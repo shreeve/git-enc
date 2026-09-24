@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -431,8 +432,15 @@ func TestUnsafePaths(t *testing.T) {
 		codes = append(codes, p.Code+": "+p.Message)
 	}
 	joined := strings.Join(codes, "\n")
-	if !strings.Contains(joined, ".git/hooks/pre-commit") || !strings.Contains(joined, "link is a symlink") {
-		t.Fatalf("problems:\n%s", joined)
+	// Where git checks symlinks out as symlinks, git-enc must refuse the
+	// path; where it writes them as plain files (Windows by default), the
+	// attack cannot happen and the committed plaintext is reported instead.
+	wantLink := "link is a symlink"
+	if fi, err := os.Lstat(filepath.Join(c.Dir, "link")); err == nil && fi.Mode()&os.ModeSymlink == 0 {
+		wantLink = "tracked-plaintext"
+	}
+	if !strings.Contains(joined, ".git/hooks/pre-commit") || !strings.Contains(joined, wantLink) {
+		t.Fatalf("problems (want %q):\n%s", wantLink, joined)
 	}
 	hook, _ := os.ReadFile(filepath.Join(c.Dir, ".git", "hooks", "pre-commit"))
 	if strings.Contains(string(hook), "API_KEY") || strings.Contains(string(hook), "pwned") {
@@ -444,15 +452,16 @@ func TestUnsafePaths(t *testing.T) {
 	outside := filepath.Join(w.root, "outside")
 	os.MkdirAll(outside, 0o755)
 	os.WriteFile(filepath.Join(outside, "secret"), []byte("not yours\n"), 0o644)
-	os.Symlink(outside, filepath.Join(c.Dir, "sub"))
-	c.Write(".gitignore", c.Read(".gitignore")+"# git-enc: team\n/sub/secret\n# git-enc: end\n")
-	c.TryEnc("add", "--all")
-	c.TryEnc("add", "sub/secret")
-	if _, err := os.Stat(filepath.Join(outside, "secret.enc")); err == nil {
-		t.Fatal("wrote through a symlinked directory")
-	}
-	if s := c.State("sub/secret"); s == "new" || s == "clean" {
-		t.Fatalf("read a file through a symlinked directory (state %q)", s)
+	if os.Symlink(outside, filepath.Join(c.Dir, "sub")) == nil {
+		c.Write(".gitignore", c.Read(".gitignore")+"# git-enc: team\n/sub/secret\n# git-enc: end\n")
+		c.TryEnc("add", "--all")
+		c.TryEnc("add", "sub/secret")
+		if _, err := os.Stat(filepath.Join(outside, "secret.enc")); err == nil {
+			t.Fatal("wrote through a symlinked directory")
+		}
+		if s := c.State("sub/secret"); s == "new" || s == "clean" {
+			t.Fatalf("read a file through a symlinked directory (state %q)", s)
+		}
 	}
 
 	// Swapping one secret's ciphertext onto another name is detected.
@@ -725,6 +734,9 @@ func TestReviewFindings(t *testing.T) {
 	})
 
 	t.Run("M4 a name starting with a quote", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip(`Windows file names cannot contain "`)
+		}
 		_, a, b := team(t)
 		a.Write(`"quoted.env`, "Q=1\n")
 		a.Enc("add", `"quoted.env`)
@@ -817,6 +829,9 @@ func TestReviewFindings(t *testing.T) {
 	})
 
 	t.Run("L5 a key others can read says so", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("no unix permissions")
+		}
 		_, a, _ := team(t)
 		os.Chmod(filepath.Join(a.home, "keys", "team"), 0o644)
 		st := a.Status()
