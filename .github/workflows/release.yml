@@ -1,0 +1,41 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write     # create the release
+  id-token: write     # sign the build attestation
+  attestations: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: test
+        run: go test -count=1 ./...
+      - name: package
+        run: scripts/package-release.sh "$GITHUB_REF_NAME" dist
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: "dist/*.tar.gz, dist/*.zip"
+      - name: publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cat > notes.md <<NOTES
+          Install on macOS or Linux:
+
+              brew install shreeve/tap/git-enc
+
+          Or download the archive for your platform, check it against
+          \`git-enc-${GITHUB_REF_NAME}-checksums.txt\`, and put \`git-enc\`
+          (\`git-enc.exe\` on Windows) on your PATH. Every archive has a build
+          attestation: \`gh attestation verify FILE --repo ${GITHUB_REPOSITORY}\`.
+          NOTES
+          gh release create "$GITHUB_REF_NAME" dist/* --title "$GITHUB_REF_NAME" --notes-file notes.md --verify-tag

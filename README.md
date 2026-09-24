@@ -39,13 +39,20 @@ $ git commit -m "Rotate the API key"
 
 ## Install
 
+On macOS or Linux:
+
 ```sh
-go install github.com/shreeve/git-enc/cmd/git-enc@latest
+brew install shreeve/tap/git-enc
 ```
 
-This puts `git-enc` on your PATH, so git runs it as `git enc`. It is one
-self-contained binary for macOS, Linux and Windows. (A Homebrew formula is
-coming.)
+On Windows, download `git-enc.exe` from the
+[latest release](https://github.com/shreeve/git-enc/releases/latest) and put
+it on your PATH. With Go installed, `go install
+github.com/shreeve/git-enc/cmd/git-enc@latest` works anywhere.
+
+git-enc is one self-contained binary; git runs it as `git enc`. Release
+archives come with sha256 checksums and GitHub build attestations
+(`gh attestation verify FILE --repo shreeve/git-enc`).
 
 ## Start using it in a repository
 
