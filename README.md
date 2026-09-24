@@ -207,6 +207,21 @@ own lines.
 Several blocks may use different keys (`# git-enc: ops`) for different
 groups of people.
 
+If an existing rule would also hide encrypted files (a common one is
+`.env*`, which matches `.env.enc`), add `!*.enc` after it. Git applies the
+last matching rule, so every `.enc` file becomes visible again, and a later
+line can still hide a particular one:
+
+```gitignore
+.env*
+!*.enc
+something-else.foo.enc
+```
+
+A rule that ignores a whole directory (`config/`) cannot be undone this way,
+because git never looks inside it; write `config/*` instead. Either way,
+`git enc status` reports any encrypted file git would ignore.
+
 ## Keys
 
 A key is one line of text, stored in `~/.config/git-enc/keys/NAME`

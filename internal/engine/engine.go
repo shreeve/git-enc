@@ -477,7 +477,7 @@ func (e *Engine) checkIgnores() error {
 		}
 		if ei[s.EncPath] {
 			e.Problems = append(e.Problems, Problem{Code: "enc-ignored", Path: s.EncPath,
-				Message: "git ignores this encrypted file, so it can't be committed; narrow the pattern that matches it"})
+				Message: "git ignores this encrypted file, so it can't be committed; add `!*.enc` after the rule that matches it (`git check-ignore -v " + s.EncPath + "` names it), or narrow that rule"})
 		}
 		if s.PlainTracked {
 			e.Problems = append(e.Problems, Problem{Code: "tracked-plaintext", Path: s.Path,
