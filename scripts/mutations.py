@@ -50,6 +50,9 @@ muts = [
   "\tcase hasTrailingComment(pat):", "\tcase false:", "TestPatterns"),
  ("unignored plaintext written (review L1)", "internal/engine/actions.go",
   "\tif s.NotIgnored {\n\t\treturn \"\", refuse(", "\tif false {\n\t\treturn \"\", refuse(", "TestReviewFindings/L1"),
+ ("negation read as ignored (v0.1.0 bug)", "internal/engine/actions.go",
+  "\"check-ignore\", \"-q\", \"--no-index\", \"--\", s.EncPath); err == nil {",
+  "\"check-ignore\", \"-v\", \"--no-index\", \"--\", s.EncPath); err == nil {", "TestNegationAfterBroadRule"),
  ("no .gitattributes -text", "internal/engine/install.go",
   "const AttrLine = \"*.enc -text diff=git-enc merge=binary\"", "const AttrLine = \"*.enc diff=git-enc merge=binary\"", "TestAutocrlfLeavesCiphertextAlone"),
 ]

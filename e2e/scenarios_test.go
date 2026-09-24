@@ -843,3 +843,23 @@ func TestReviewFindings(t *testing.T) {
 		}
 	})
 }
+
+// A broad rule outside the block (".env*", common in real projects) hides
+// .env.enc; a `!.env.enc` line after it fixes that, and add must accept it.
+func TestNegationAfterBroadRule(t *testing.T) {
+	w := newWorld(t)
+	a := w.clone("alice")
+	a.Enc("key", "new", "team")
+	a.Write(".gitignore", ".env*\n")
+	a.Write(".env", "K=1\n")
+	r := a.TryEnc("add", "--key", "team", ".env")
+	if r.Code != 3 || !strings.Contains(r.Err, "add `!.env.enc` after it") {
+		t.Fatalf("broad rule: exit %d %s", r.Code, r.Err)
+	}
+	a.Write(".gitignore", ".env*\n!.env.enc\n")
+	a.Enc("add", "--key", "team", ".env")
+	a.expectState(".env", "clean")
+	if out := a.Git("status", "--porcelain"); strings.Contains(out, " .env\n") || !strings.Contains(out, ".env.enc") {
+		t.Fatalf("status:\n%s", out)
+	}
+}

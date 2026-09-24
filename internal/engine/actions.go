@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -177,9 +178,12 @@ func (e *Engine) checkIgnored(s *Secret) error {
 	if _, err := e.Repo.Git("check-ignore", "-q", "--no-index", "--", s.Path); err != nil {
 		return refuse("%s is declared in .gitignore but git does not ignore it (a `!` rule?); fix that first", s.Path)
 	}
-	if out, err := e.Repo.Git("check-ignore", "-v", "--no-index", "--", s.EncPath); err == nil {
+	// Decide with -q: with -v, git also reports a path matched by a `!`
+	// rule (which un-ignores it), and exits 0 for it.
+	if _, err := e.Repo.Git("check-ignore", "-q", "--no-index", "--", s.EncPath); err == nil {
+		out, _ := e.Repo.Git("check-ignore", "-v", "--no-index", "--", s.EncPath)
 		src := strings.SplitN(strings.TrimSpace(string(out)), "\t", 2)[0]
-		return refuse("%s would be ignored by git (%s); narrow that pattern", s.EncPath, src)
+		return refuse("%s would be ignored by git (%s); narrow that pattern, or add `!%s` after it", s.EncPath, src, path.Base(s.EncPath))
 	}
 	return nil
 }
