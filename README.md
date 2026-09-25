@@ -167,7 +167,11 @@ hooks that **never encrypt or decrypt anything**:
 - **pre-push** refuses to push commits that contain a secret's plaintext
   (committed with `--no-verify`, say), and gives the same reminder.
 - **post-checkout, post-merge, post-rewrite** remind you when secrets
-  changed in git (`run git enc update`).
+  changed in git (`run git enc update`). With
+  `git config enc.autoUpdate true` they bring them up to date instead, but
+  only what needs no judgment: a copy git history already holds, or a
+  missing one. Anything with your edits in it still waits for
+  `git enc update`.
 
 Existing hooks are kept and run after git-enc's. If `core.hooksPath` is set
 (a hook manager, or a global hooks directory), `init` leaves it alone and
@@ -213,12 +217,23 @@ to the same workflow.
 
 ## GitHub Desktop
 
-git-enc works with GitHub Desktop as it is. After `git enc add`, the `.enc`
-file appears in Desktop's changes like any other file, and you commit it
-there. Two things to know:
+git-enc works with GitHub Desktop as it is, once `git enc init` has run in
+the clone. After `git enc add`, the `.enc` file appears in Desktop's
+changes like any other file, and you commit it there.
 
-- Desktop cannot see the plaintext (it's ignored), so an edited secret does
-  not show up in Desktop until you run `git enc add`.
+Desktop shows a hook's output only when the hook fails, so git-enc's
+reminders would go unseen there. When Desktop runs git (git-enc can tell),
+the hooks do instead what the reminders ask for:
+
+- **Pulls and branch switches update your secrets** (as
+  `enc.autoUpdate` does), except ones with your edits in them.
+- **A commit is refused while a secret is edited but not encrypted**, with
+  the reason in Desktop's error dialog: Desktop cannot see the plaintext
+  (it is ignored), so run `git enc add` in a terminal first. To commit
+  without it: `git config enc.requireAdded false`.
+
+Also:
+
 - Desktop shows `.enc` changes as binary files.
 - Pulls merge secrets like other files. If both of you changed the same
   line, Desktop shows a conflict on the `.enc` and offers only "use mine"

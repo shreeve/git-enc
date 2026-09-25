@@ -779,6 +779,31 @@ func cmdCat(args []string) (int, error) {
 	return exitOK, nil
 }
 
+// postHook runs after git changed the worktree. It never stops anything.
+// With automatic updates on (enc.autoUpdate, or under GitHub Desktop) it
+// takes the lock if it is free and brings secrets up to date; otherwise,
+// and for whatever needs you, it reminds.
+func postHook(name string) int {
+	e, err := engine.OpenStatus(".")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "git-enc:", err)
+		return exitOK
+	}
+	out, updated := e.AutoUpdate()
+	if updated {
+		out = append(out, e.Reminders()...)
+	} else {
+		out, _ = e.Hook(name)
+	}
+	for _, l := range out {
+		fmt.Fprintln(os.Stderr, l)
+	}
+	if err := e.Close(); err != nil {
+		fmt.Fprintln(os.Stderr, "git-enc:", err)
+	}
+	return exitOK
+}
+
 // cmdMergeDriver is git's merge driver for .enc files (`git enc init` sets
 // it up): exit 0 with the merged file written over ours, or 1 for a
 // conflict, which `git enc merge` then resolves in the plaintext.
@@ -807,6 +832,10 @@ func cmdHook(args []string) int {
 	}
 	if args[0] == "post-checkout" && len(args) == 4 && args[3] == "1" && engine.SameSecrets(".", args[1], args[2]) {
 		return exitOK // a branch switch that changed no .enc and no .gitignore: nothing to remind
+	}
+	switch args[0] {
+	case "post-checkout", "post-merge", "post-rewrite":
+		return postHook(args[0])
 	}
 	e, err := engine.OpenReadOnly(".")
 	if err != nil {

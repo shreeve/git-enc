@@ -158,7 +158,9 @@ func open(dir string, write, try bool) (*Engine, error) {
 		if e.lock, err = state.Acquire(filepath.Join(e.baseDir, "lock")); err != nil {
 			return nil, err
 		}
-	case try:
+	case try && !repo.Rebasing():
+		// Mid-rebase, what it would learn (a commit about to be rewritten
+		// as committed) would not hold once the rebase ends: read only.
 		if e.lock, err = state.TryAcquire(filepath.Join(e.baseDir, "lock")); err != nil {
 			return nil, err
 		}

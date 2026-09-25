@@ -23,6 +23,11 @@
 - `git enc verify [RANGE]` checks a repository for CI with no key: no
   plaintext committed (also in RANGE's commits), every `.enc` encrypted,
   `.gitignore` sound. The README has a GitHub Actions workflow.
+- `git config enc.autoUpdate true`: pulls and checkouts bring secrets up
+  to date by themselves (never one with your edits in it).
+- Under GitHub Desktop, which hides hook reminders, the hooks act instead:
+  pulls update secrets, and a commit with a secret edited but not
+  encrypted is refused with the reason.
 - `git config enc.skipKeys ops` quiets the blocks of a key you don't hold
   on purpose (another group's secrets, or a CI job's).
 - `git enc update` warns when a secret would go back to an earlier value,

@@ -130,6 +130,15 @@ muts = [
   "out = append(out, s.EncPath+\": not an encrypted file\")", "_ = s", "TestVerify"),
  ("rollback not warned", "internal/engine/verify.go",
   "case eq && changed:", "case false && eq && changed:", "TestRollbackWarned"),
+ ("no automatic update", "internal/engine/hooks.go",
+  "if e.lock == nil || !e.Repo.ConfigBool(\"enc.autoUpdate\", RunByDesktop()) {",
+  "if true || e.lock == nil || !e.Repo.ConfigBool(\"enc.autoUpdate\", RunByDesktop()) {", "TestAutoUpdate"),
+ ("automatic update touches an edit", "internal/engine/hooks.go",
+  "if s.Kind == Outdated || s.Kind == Missing {", "if s.Kind != Clean {", "TestAutoUpdate"),
+ ("GitHub Desktop not recognized", "internal/engine/hooks.go",
+  "\t\tif strings.Contains(p, s) {", "\t\tif false && strings.Contains(p, s) {", "TestGitHubDesktop"),
+ ("state saved in the middle of a rebase", "internal/engine/engine.go",
+  "case try && !repo.Rebasing():", "case try:", "TestMergeDriver/different_lines_merge_in_git_pull_--rebase"),
 ]
 stale = [name for name, f, old, _, _ in muts if old not in open(f).read()]
 if stale:

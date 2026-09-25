@@ -93,7 +93,7 @@ type Repo struct {
 
 // openGitPaths are the --git-path names asked for at Open, in the same
 // rev-parse call, since nearly every command needs them.
-var openGitPaths = []string{"git-enc", "info/exclude", "hooks", "info/attributes", "MERGE_HEAD"}
+var openGitPaths = []string{"git-enc", "info/exclude", "hooks", "info/attributes", "MERGE_HEAD", "rebase-merge", "rebase-apply"}
 
 // Open finds the repository containing dir. One `git rev-parse` answers
 // everything a command needs to know about the repository's layout: git
@@ -209,7 +209,7 @@ func (r *Repo) Config(key string) string {
 
 // knownConfig are the settings git-enc reads, fetched together, as
 // written, the first time any of them is asked for.
-var knownConfig = []string{"core.ignorecase", "enc.requireadded", "enc.skipkeys"}
+var knownConfig = []string{"core.ignorecase", "enc.requireadded", "enc.skipkeys", "enc.autoupdate"}
 
 // ConfigBool reads a boolean config value with a default.
 func (r *Repo) ConfigBool(key string, def bool) bool {
@@ -364,6 +364,11 @@ func (r *Repo) Blobs(ids []string) (map[string][]byte, error) {
 		return nil, &Error{Args: []string{"cat-file", "--batch"}, Stderr: errb.String(), Err: err}
 	}
 	return res, nil
+}
+
+// Rebasing reports whether a rebase is in progress.
+func (r *Repo) Rebasing() bool {
+	return Exists(r.gitPaths["rebase-merge"]) || Exists(r.gitPaths["rebase-apply"])
 }
 
 // HasHead reports whether HEAD points at a commit.
