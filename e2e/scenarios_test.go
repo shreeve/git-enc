@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"filippo.io/age"
+	"github.com/shreeve/git-enc/internal/envelope"
 )
 
 // The everyday loop: Bob gets the secret on init, edits it, adds it,
@@ -420,7 +421,7 @@ func TestUnsafePaths(t *testing.T) {
 		t.Fatal("pre-commit allowed committing a secret's plaintext")
 	}
 	a.Git("commit", "-q", "--no-verify", "-m", "evil")
-	a.Git("push", "-q", "origin", "HEAD")
+	a.Git("push", "-q", "--no-verify", "origin", "HEAD")
 
 	c.Git("pull", "-q")
 	c.TryEnc("init")
@@ -468,7 +469,8 @@ func TestUnsafePaths(t *testing.T) {
 
 	// Swapping one secret's ciphertext onto another name is detected.
 	c.Write("other.env.enc", c.Read(".env.enc"))
-	c.Write(".gitignore", c.Read(".gitignore")+"# git-enc: team\n/other.env\n# git-enc: end\n")
+	fp := c.Status().Keys[0].Fingerprint
+	c.Write(".gitignore", "# git-enc: team "+fp+"\n/.env\n/other.env\n# git-enc: end\n")
 	if s := c.State("other.env"); s != "corrupt" {
 		t.Fatalf("swapped ciphertext state = %q", s)
 	}
@@ -909,11 +911,14 @@ func TestRekey(t *testing.T) {
 	shareKey(t, a, b, "team2")
 	b.expectState(".env", "clean")
 	b.expectState("config.yml", "outdated")
-	// With its memory lost, git-enc still finds Bob's copy in history,
-	// sealed with the old key.
+	// With its memory lost, git-enc cannot place Bob's copy: the versions
+	// before the rotation open only with the old key, which it no longer
+	// trusts for this block. It says so and keeps his copy.
 	os.Remove(filepath.Join(b.Dir, ".git", "git-enc", "state"))
 	os.Remove(filepath.Join(b.Dir, ".git", "git-enc", "cache"))
-	b.expectState("config.yml", "outdated")
+	b.expectState("config.yml", "diverged")
+	os.WriteFile(filepath.Join(b.Dir, ".git", "git-enc", "state"), nil, 0o600)
+	b.Enc("update", "--discard", "config.yml")
 	b.Enc("update")
 	if got := b.Read("config.yml"); got != "db: mine\n" {
 		t.Fatalf("bob's config.yml = %q", got)
@@ -926,7 +931,7 @@ func TestRekey(t *testing.T) {
 	c.expectState(".env", "no-key")
 }
 
-// Moving a secret to another block by hand, then `git enc rekey`.
+// Moving a secret to another block by hand, then `git enc rekey OLD NEW FILE`.
 func TestRekeyMovedSecret(t *testing.T) {
 	_, a, _ := team(t)
 	a.Enc("key", "new", "ops")
@@ -935,10 +940,10 @@ func TestRekeyMovedSecret(t *testing.T) {
 	}
 	a.Write(".gitignore", strings.Replace(a.Read(".gitignore"), "/.env\n", "", 1)+"\n# git-enc: ops\n/.env\n# git-enc: end\n")
 	st := a.Status()
-	if st.Secrets[0].State != "no-key" || !strings.Contains(st.Secrets[0].Message, "git enc rekey") {
+	if st.Secrets[0].State != "no-key" || !strings.Contains(st.Secrets[0].Message, "git enc rekey team ops .env") {
 		t.Fatalf("moved secret: %+v", st.Secrets[0])
 	}
-	a.Enc("rekey")
+	a.Enc("rekey", "team", "ops", ".env")
 	a.expectState(".env", "clean")
 	if !strings.Contains(a.Read(".gitignore"), "# git-enc: ops ") {
 		t.Fatalf("no fingerprint on the ops block:\n%s", a.Read(".gitignore"))
@@ -1119,6 +1124,174 @@ func TestGitEnvironment(t *testing.T) {
 		a.Git("commit", "-q", "-m", "other")
 		if out := a.Git("checkout", "main"); !strings.Contains(out, "run `git enc update`") {
 			t.Fatalf("no reminder when the checkout changed a secret:\n%s", out)
+		}
+	})
+}
+
+// .gitignore is written by everyone who can push. Editing a block's header
+// must never point one group's secrets at another key the user holds.
+func TestKeyRedirect(t *testing.T) {
+	setup := func(t *testing.T) *Person {
+		w := newWorld(t)
+		a := w.clone("alice")
+		a.Enc("key", "new", "team")
+		a.Enc("key", "new", "ops")
+		a.Write(".env", "APP=1\n")
+		a.Enc("add", "--key", "team", ".env")
+		a.Write("prod.env", "ROOT=hunter2\n")
+		a.Enc("add", "--key", "ops", "prod.env")
+		a.Git("commit", "-q", "-m", "two groups")
+		return a
+	}
+	fingerprint := func(a *Person, key string) string {
+		for _, k := range a.Status().Keys {
+			if k.Name == key {
+				return k.Fingerprint
+			}
+		}
+		t.Fatalf("no key %s", key)
+		return ""
+	}
+
+	t.Run("fingerprint swapped", func(t *testing.T) {
+		a := setup(t)
+		teamFP, opsFP := fingerprint(a, "team"), fingerprint(a, "ops")
+		a.Write(".gitignore", strings.Replace(a.Read(".gitignore"), "ops "+opsFP, "ops "+teamFP, 1))
+		st := a.Status()
+		for _, s := range st.Secrets {
+			if s.Path == "prod.env" && (s.State != "no-key" || !strings.Contains(s.Message, "someone changed .gitignore")) {
+				t.Fatalf("prod.env: %+v", s)
+			}
+		}
+		a.Write("db.env", "DB=secret\n")
+		if r := a.TryEnc("add", "--key", "ops", "db.env"); r.Code == 0 {
+			t.Fatalf("a new ops secret was encrypted with the team key:\n%s", r.Out)
+		}
+	})
+
+	t.Run("fingerprint of a key from elsewhere", func(t *testing.T) {
+		a := setup(t)
+		a.Enc("key", "new", "other") // say, another project's
+		otherFP := ""
+		for _, l := range strings.Split(a.Enc("key", "list"), "\n") {
+			if f := strings.Fields(l); len(f) > 1 && f[0] == "other" {
+				otherFP = f[1]
+			}
+		}
+		a.Write(".gitignore", strings.Replace(a.Read(".gitignore"), "ops "+fingerprint(a, "ops"), "ops "+otherFP, 1))
+		a.Write("db.env", "DB=secret\n")
+		if r := a.TryEnc("add", "--key", "ops", "db.env"); r.Code == 0 || !strings.Contains(r.Err, "fingerprint of your key other") {
+			t.Fatalf("a new ops secret was encrypted with another project's key (exit %d):\n%s%s", r.Code, r.Out, r.Err)
+		}
+	})
+
+	t.Run("header renamed to another block's key", func(t *testing.T) {
+		a := setup(t)
+		teamFP, opsFP := fingerprint(a, "team"), fingerprint(a, "ops")
+		a.Write(".gitignore", strings.Replace(a.Read(".gitignore"), "ops "+opsFP, "team "+teamFP, 1))
+		st := a.Status()
+		if len(st.Problems) == 0 || st.Problems[0].Code != "shared-key" {
+			t.Fatalf("problems: %+v", st.Problems)
+		}
+		// A new secret in the renamed block would be readable by everyone
+		// with the team key.
+		a.Write(".gitignore", strings.Replace(a.Read(".gitignore"), "/prod.env\n", "/prod.env\n/db.env\n", 1))
+		a.Write("db.env", "DB=secret\n")
+		if r := a.TryEnc("add", "db.env"); r.Code == 0 {
+			t.Fatalf("db.env was encrypted with the team key:\n%s", r.Out)
+		}
+	})
+}
+
+// A .enc sealed with some other key the user holds (from another project)
+// is never read as this secret: it could carry anyone's content.
+func TestForeignKeyRejected(t *testing.T) {
+	_, a, _ := team(t)
+	a.Enc("key", "new", "other")
+	id, err := age.ParseHybridIdentity(strings.TrimSpace(a.Enc("key", "show", "other")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	evil, err := envelope.Seal(".env", []byte("API_KEY=attacker\n"), id.Recipient())
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.Git("checkout", "-q", "-b", "evil")
+	os.WriteFile(filepath.Join(a.Dir, ".env.enc"), evil, 0o644)
+	a.Git("add", ".env.enc")
+	a.Git("commit", "-q", "-m", "evil")
+	a.Git("checkout", "-q", "main")
+	a.Write(".env", "API_KEY=mine\n")
+	a.Enc("add", ".env")
+	a.Git("commit", "-q", "-m", "mine")
+	if r := a.TryGit("merge", "-q", "evil"); r.Code == 0 {
+		t.Fatal("expected a merge conflict on .env.enc")
+	}
+	if r := a.TryEnc("merge"); r.Code == 0 {
+		t.Fatalf("merge accepted a side sealed with another key:\n%s", r.Out)
+	}
+	a.Git("merge", "--abort")
+	a.Git("reset", "-q", "--hard", "evil")
+	if r := a.TryEnc("update"); r.Code == 0 || a.Read(".env") != "API_KEY=mine\n" {
+		t.Fatalf("update: exit %d, .env = %q", r.Code, a.Read(".env"))
+	}
+}
+
+// The guards that keep a mistake from costing a secret.
+func TestGuards(t *testing.T) {
+	t.Run("an unreadable plaintext is never overwritten", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("no unix permissions")
+		}
+		_, a, _ := team(t)
+		a.Write(".env", "API_KEY=my edit\n")
+		env := filepath.Join(a.Dir, ".env")
+		os.Chmod(env, 0)
+		defer os.Chmod(env, 0o600)
+		a.expectState(".env", "corrupt")
+		a.TryEnc("update")
+		a.TryEnc("update", "--discard", ".env")
+		os.Chmod(env, 0o600)
+		if got := a.Read(".env"); got != "API_KEY=my edit\n" {
+			t.Fatalf(".env = %q", got)
+		}
+	})
+
+	t.Run("a deleted .enc is not clean", func(t *testing.T) {
+		_, a, _ := team(t)
+		a.Git("rm", "-q", ".env.enc")
+		a.expectState(".env", "missing")
+		if r := a.TryEnc("check"); r.Code != 3 {
+			t.Fatalf("check: exit %d", r.Code)
+		}
+		if r := a.TryGit("commit", "-q", "-m", "oops"); r.Code == 0 || !strings.Contains(r.Err, "refusing to delete .env.enc") {
+			t.Fatalf("deleting the only encrypted copy was committed (exit %d):\n%s", r.Code, r.Err)
+		}
+		a.Enc("add", ".env")
+		a.expectState(".env", "clean")
+		if out := a.Git("status", "--porcelain"); out != "" {
+			t.Fatalf("not restored:\n%s", out)
+		}
+	})
+
+	t.Run("block lines git-enc refuses still guard commits", func(t *testing.T) {
+		_, a, _ := team(t)
+		a.Write(".gitignore", strings.Replace(a.Read(".gitignore"), "# git-enc: end", "secrets/\n/cfg[[:digit:]].yml\n# git-enc: end", 1))
+		a.Write("secrets/db.yml", "DB=1\n")
+		a.Write("cfg2.yml", "C=2\n")
+		a.Git("add", "-f", "secrets/db.yml", "cfg2.yml")
+		r := a.TryGit("commit", "-q", "-m", "oops")
+		if r.Code == 0 || !strings.Contains(r.Err, "secret secrets/db.yml") || !strings.Contains(r.Err, "secret cfg2.yml") {
+			t.Fatalf("plaintext committed (exit %d):\n%s", r.Code, r.Err)
+		}
+	})
+
+	t.Run("plaintext is not pushed", func(t *testing.T) {
+		_, a, _ := team(t)
+		a.Git("add", "-f", ".env")
+		a.Git("commit", "-q", "--no-verify", "-m", "oops")
+		if r := a.TryGit("push", "-q", "origin", "HEAD"); r.Code == 0 || !strings.Contains(r.Err, "refusing to push") {
+			t.Fatalf("plaintext pushed (exit %d):\n%s", r.Code, r.Err)
 		}
 	})
 }

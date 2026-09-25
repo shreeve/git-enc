@@ -119,18 +119,42 @@ func (e *Engine) syncExclude() error {
 // rest only remind.
 var HookNames = []string{"pre-commit", "pre-push", "post-checkout", "post-merge", "post-rewrite"}
 
-const hookMarker = "# git-enc hook"
+const (
+	hookMarker  = "# git-enc hook"
+	hookVersion = "# git-enc hook version 2" // bump when hookScript changes
+)
 
 func hookScript(name, binary string) string {
 	// The binary is called by absolute path: GitHub Desktop started from the
-	// Dock may not have Homebrew on PATH. stdin goes to the chained hook,
-	// not to git-enc (pre-push and post-rewrite read their input there).
+	// Dock may not have Homebrew on PATH.
 	onFail := "exit $?"
 	if name != "pre-commit" && name != "pre-push" {
 		onFail = ":"
 	}
+	if name == "pre-push" {
+		// git-enc and the chained hook both read the refs being pushed.
+		return fmt.Sprintf(`#!/bin/sh
+%s (installed by `+"`git enc init`"+`; safe to delete)
+%s
+GIT_ENC=%s
+input=$(cat)
+if [ -x "$GIT_ENC" ]; then
+	printf '%%s' "$input" | "$GIT_ENC" hook %s "$@" || %s
+else
+	echo "git-enc: $GIT_ENC not found; reinstall git-enc, then run 'git enc init'" >&2
+fi
+if [ -x "$0.git-enc-chained" ]; then
+	if [ -n "$input" ]; then printf '%%s
+' "$input"; fi | "$0.git-enc-chained" "$@"
+	exit $?
+fi
+`, hookMarker, hookVersion, shellQuote(binary), name, onFail)
+	}
+	// stdin goes to the chained hook, not to git-enc (post-rewrite reads
+	// its input there).
 	return fmt.Sprintf(`#!/bin/sh
 %s (installed by `+"`git enc init`"+`; safe to delete)
+%s
 GIT_ENC=%s
 if [ -x "$GIT_ENC" ]; then
 	"$GIT_ENC" hook %s "$@" </dev/null || %s
@@ -140,7 +164,7 @@ fi
 if [ -x "$0.git-enc-chained" ]; then
 	exec "$0.git-enc-chained" "$@"
 fi
-`, hookMarker, shellQuote(binary), name, onFail)
+`, hookMarker, hookVersion, shellQuote(binary), name, onFail)
 }
 
 func shellQuote(s string) string {
@@ -181,7 +205,8 @@ func (e *Engine) installHooks(binary string) ([]string, error) {
 	return out, nil
 }
 
-// HooksInstalled reports whether every git-enc hook is in place.
+// HooksInstalled reports whether every git-enc hook is in place and
+// current (an older one lacks checks; `git enc init` updates it).
 func (e *Engine) HooksInstalled() bool {
 	dir, err := e.Repo.GitPath("hooks")
 	if err != nil {
@@ -189,7 +214,7 @@ func (e *Engine) HooksInstalled() bool {
 	}
 	for _, name := range HookNames {
 		data, err := os.ReadFile(filepath.Join(dir, name))
-		if err != nil || !bytes.Contains(data, []byte(hookMarker)) {
+		if err != nil || !bytes.Contains(data, []byte(hookVersion)) {
 			return false
 		}
 	}

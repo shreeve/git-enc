@@ -108,14 +108,14 @@ Put `git enc check` in the script that starts your app (`bin/dev`, a
 |---|---|---|
 | `clean` | Your copy matches the committed version | — |
 | `modified` / `new` | You edited it (or it isn't encrypted yet) | `git enc add` |
-| `outdated` / `missing` | Someone committed a newer version | `git enc update` |
+| `outdated` / `missing` | Someone committed a newer version (or your `.enc` was deleted) | `git enc update` |
 | `conflict` | You edited it *and* it changed in git | `git enc update` |
 | `diverged` | It matches no committed version and git-enc has no record to tell why | `git enc update` |
 | `merging` | Git has a merge or rebase conflict on the `.enc` | `git enc merge` |
 | `no-key` | You don't have the key (or have a different key with that name) | `git enc key add` |
-| `no-key` (…`git enc rekey`) | Its block now uses another key, and you have the old one | `git enc rekey` |
+| `no-key` (…`git enc rekey`) | Its `.enc` opens with another of your keys than its block names | `git enc rekey OLD NEW FILE` if you moved it; otherwise check `git log -p .gitignore` |
 | `orphaned` | No block lists it any more, but the plaintext or `.enc` is still here | `git enc add` to declare it again, or delete it |
-| `corrupt` | The `.enc` can't be read, or was encrypted for a different path | restore it from git, or ask who wrote it |
+| `corrupt` | The `.enc` or the plaintext can't be read, or the `.enc` was encrypted for a different path | restore it from git, or fix the file's permissions |
 
 ### It never loses your work
 
@@ -150,7 +150,8 @@ tell, it says so (`diverged`) instead of guessing.
   `git add -f .env`, or a plaintext copied over `.env.enc`), and reminds
   you of edits you haven't added. Set
   `git config enc.requireAdded true` to make that reminder block the commit.
-- **pre-push** gives the same reminder.
+- **pre-push** refuses to push commits that contain a secret's plaintext
+  (committed with `--no-verify`, say), and gives the same reminder.
 - **post-checkout, post-merge, post-rewrite** remind you when secrets
   changed in git (`run git enc update`).
 
@@ -200,8 +201,10 @@ own lines.
 - To keep the rules exact, a block refuses directory patterns
   (`secrets/`), patterns ending in `*` (`secrets/*`, `.env*`), and patterns
   ending in `.enc`, because each would also hide the `.enc` files; name the
-  extension (`secrets/*.yml`) or list the files. It also refuses `**` and
-  negations (`!`). If some other rule still hides a `.enc` file, or a `!`
+  extension (`secrets/*.yml`) or list the files. It also refuses `**`,
+  character classes like `[[:digit:]]`, and negations (`!`). Git still
+  ignores what a refused line matches, and the pre-commit hook still keeps
+  those files out of commits. If some other rule still hides a `.enc` file, or a `!`
   rule un-ignores a plaintext, `git enc status` reports it and git-enc
   refuses to write that file.
 - Secrets can never be `.gitignore`, `.gitattributes`, `.gitmodules`, or
@@ -212,8 +215,9 @@ own lines.
   ciphertext.
 
 Several blocks may use different keys (`# git-enc: ops`) for different
-groups of people. To move a secret to another block, move its line there
-and run `git enc rekey`.
+groups of people; each block needs its own key. To move a secret to
+another block, move its line there and run `git enc rekey OLD NEW FILE`
+(for example `git enc rekey team ops config/prod.env`).
 
 If an existing rule would also hide encrypted files (a common one is
 `.env*`, which matches `.env.enc`), add `!*.enc` after it. Git applies the
@@ -286,6 +290,12 @@ fork, a CI cache, GitHub itself.
   disk encryption.
 - **Who wrote a file.** Anyone with the key can write a valid `.enc`. Use
   branch protection and code review as you would for code.
+- **`.gitignore` from someone who can push.** git-enc only uses a key
+  whose name *and* fingerprint match a block's header, refuses two blocks
+  that share a key, and only re-encrypts under a new key when you run
+  `git enc rekey` and name both keys. But review changes to git-enc blocks
+  as you would code: a block pointed at a key someone else holds would
+  encrypt the secrets you add next for them.
 
 **When not to use it**: production credentials, anything under an audit
 regime (HIPAA, SOC 2), large teams, or teams with frequent turnover. Those

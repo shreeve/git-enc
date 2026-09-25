@@ -8,6 +8,7 @@ import (
 	"github.com/shreeve/git-enc/internal/envelope"
 	"github.com/shreeve/git-enc/internal/fsx"
 	"github.com/shreeve/git-enc/internal/gitx"
+	"github.com/shreeve/git-enc/internal/spec"
 )
 
 // Hook runs one git hook. It returns the lines to print and whether the git
@@ -25,6 +26,14 @@ func (e *Engine) Hook(name string) ([]string, bool) {
 		}
 		for _, p := range bad {
 			out = append(out, fmt.Sprintf("git-enc: refusing to commit the plaintext secret %s\n  unstage it with: git rm --cached -- %s", p, p))
+			stop = true
+		}
+		deleted, err := e.stagedEncDeletions()
+		if err != nil {
+			return []string{"git-enc: cannot check this commit for plaintext secrets: " + err.Error()}, true
+		}
+		for _, p := range deleted {
+			out = append(out, fmt.Sprintf("git-enc: refusing to delete %s.enc: %s is still declared in .gitignore\n  to stop encrypting it, remove its line from .gitignore too; to keep it: git enc update %s", p, p, p))
 			stop = true
 		}
 		unsealed, err := e.stagedUnsealed()
@@ -51,6 +60,42 @@ func (e *Engine) Hook(name string) ([]string, bool) {
 		out = append(out, e.Reminders()...)
 	}
 	return out, stop
+}
+
+// OutgoingPlaintext lists secret plaintext in the commits a push would send.
+// refs is the pre-push hook's input: "<local ref> <local sha> <remote ref>
+// <remote sha>" per line. Commits any remote already has are left out:
+// what they hold has left this machine either way.
+func (e *Engine) OutgoingPlaintext(refs string) ([]string, error) {
+	var tips []string
+	for _, line := range strings.Split(refs, "\n") {
+		f := strings.Fields(line)
+		if len(f) == 4 && strings.Trim(f[1], "0") != "" {
+			tips = append(tips, f[1])
+		}
+	}
+	if len(tips) == 0 {
+		return nil, nil
+	}
+	args := append([]string{"log", "--format=", "--name-only", "-z", "--no-renames", "--diff-filter=ACMRT"}, tips...)
+	out, err := e.Repo.Git(append(args, "--not", "--remotes")...)
+	if err != nil {
+		return nil, err
+	}
+	seen := map[string]bool{}
+	var bad []string
+	for _, p := range gitx.SplitZ(out) {
+		p = strings.TrimLeft(p, "\n")
+		if p == "" || seen[p] || strings.HasSuffix(p, ".enc") {
+			continue
+		}
+		seen[p] = true
+		name := strings.TrimSuffix(p, ".incoming")
+		if b, _, err := e.Spec.Match(p); b != nil || err != nil || e.managed(p) || (name != p && e.managed(name)) || isTemp(p) {
+			bad = append(bad, p)
+		}
+	}
+	return bad, nil
 }
 
 // SameSecrets reports whether commits a and b (a post-checkout hook's
@@ -92,22 +137,80 @@ func (e *Engine) Reminders() []string {
 	return out
 }
 
-// stagedPlaintext lists staged files that are secret plaintext: declared
-// in a block, managed by this clone before, or an .incoming copy.
+// stagedPlaintext lists staged files that are secret plaintext: matched by
+// a line of a block (as git itself reads it, or as git-enc does), managed
+// by this clone before, or an .incoming or temporary copy.
 func (e *Engine) stagedPlaintext() ([]string, error) {
 	out, err := e.Repo.Git("diff", "--cached", "--name-only", "-z", "--diff-filter=ACMRT")
 	if err != nil {
 		return nil, err
 	}
+	staged := gitx.SplitZ(out)
+	if len(staged) == 0 {
+		return nil, nil
+	}
+	byGit, err := e.blockMatches()
+	if err != nil {
+		return nil, err
+	}
 	var bad []string
-	for _, p := range gitx.SplitZ(out) {
+	for _, p := range staged {
 		if strings.HasSuffix(p, ".enc") {
 			continue
 		}
 		name := strings.TrimSuffix(p, ".incoming")
 		b, _, err := e.Spec.Match(p)
-		if b != nil || err != nil || e.managed(p) || (name != p && e.managed(name)) || isTemp(p) {
+		if b != nil || err != nil || byGit[p] || e.managed(p) || (name != p && e.managed(name)) || isTemp(p) {
 			bad = append(bad, p)
+		}
+	}
+	return bad, nil
+}
+
+// blockMatches lists the files in the index that git matches with the lines
+// of the git-enc blocks, including lines git-enc refuses (`secrets/`,
+// `[[:digit:]]`…): whatever git-enc thinks of them, git ignores those
+// files, so they are secrets. `!` lines are left out: in a block they
+// would only un-declare a secret.
+func (e *Engine) blockMatches() (map[string]bool, error) {
+	args := []string{"ls-files", "-z", "--cached", "--ignored"}
+	for _, b := range e.Spec.Blocks {
+		for _, l := range b.Lines {
+			if !strings.HasPrefix(l, "!") {
+				args = append(args, "--exclude="+spec.TrimTrailingSpace(l))
+			}
+		}
+	}
+	res := map[string]bool{}
+	if len(args) == 4 {
+		return res, nil
+	}
+	out, err := e.Repo.Git(args...)
+	if err != nil {
+		return nil, err
+	}
+	for _, p := range gitx.SplitZ(out) {
+		res[p] = true
+	}
+	return res, nil
+}
+
+// stagedEncDeletions lists secrets still declared in a block whose F.enc
+// the commit would delete: the only encrypted copy of a secret someone
+// still relies on.
+func (e *Engine) stagedEncDeletions() ([]string, error) {
+	out, err := e.Repo.Git("diff", "--cached", "--name-only", "-z", "--no-renames", "--diff-filter=D")
+	if err != nil {
+		return nil, err
+	}
+	var bad []string
+	for _, p := range gitx.SplitZ(out) {
+		name := strings.TrimSuffix(p, ".enc")
+		if name == p {
+			continue
+		}
+		if b, _, _ := e.Spec.Match(name); b != nil {
+			bad = append(bad, name)
 		}
 	}
 	return bad, nil
