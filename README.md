@@ -178,6 +178,39 @@ the commit and says why (`git commit --no-verify` skips it when you are sure).
 Every plaintext git-enc has managed is also listed in `.git/info/exclude`, so
 it stays out of commits even on a branch whose `.gitignore` lacks the block.
 
+### In CI
+
+Hooks run on each person's machine, and anyone can skip them. `git enc
+verify` is the check on the server's side: it needs no key, so it runs on
+every pull request, forks included. It fails (exit 3) if a secret's
+plaintext or a `.incoming` copy is committed, if a secret's `.enc` is not
+an encrypted file, or if `.gitignore` has a problem `git enc status` would
+report (a secret git does not ignore, one block pointed at another's key).
+Given a range, it also checks every file those commits add or change, so
+plaintext committed and then deleted again still fails:
+
+```yaml
+# .github/workflows/secrets.yml
+name: secrets
+on: pull_request
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0              # the range needs the history
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - run: go install github.com/shreeve/git-enc/cmd/git-enc@latest
+      - run: git enc verify "origin/${{ github.base_ref }}..HEAD"
+```
+
+git-enc only guards the files you declare. To catch a key pasted into
+code, add a secret scanner such as [gitleaks](https://github.com/gitleaks/gitleaks)
+to the same workflow.
+
 ## GitHub Desktop
 
 git-enc works with GitHub Desktop as it is. After `git enc add`, the `.enc`
@@ -327,6 +360,10 @@ fork, a CI cache, GitHub itself.
   disk encryption.
 - **Who wrote a file.** Anyone with the key can write a valid `.enc`. Use
   branch protection and code review as you would for code.
+- **Rollbacks, fully.** Anyone who can push can commit an older `.enc` over
+  a newer one, say of a secret changed because it leaked. `git enc update`
+  warns when it would take a secret back to a value it had before, but
+  applies it; check before you rely on it.
 - **`.gitignore` from someone who can push.** git-enc only uses a key
   whose name *and* fingerprint match a block's header, refuses two blocks
   that share a key, and only re-encrypts under a new key when you run
@@ -339,6 +376,32 @@ regime (HIPAA, SOC 2), large teams, or teams with frequent turnover. Those
 need per-person access, revocation and audit logs; use a secrets manager
 (1Password, Doppler, Vault, a cloud KMS, SOPS). git-enc fits small, trusted
 teams sharing development and staging secrets.
+
+## Compared with other tools
+
+- **git-crypt, transcrypt** decrypt files as git checks them out, so there
+  is nothing to run. But a file is committed in plain text whenever the
+  filter is missing (a new clone, an attribute added after the file),
+  encryption is deterministic (a reverted secret is visibly the old file)
+  and lengths show; there is no key rotation. git-enc makes plaintext
+  impossible to commit by construction, pads, re-randomizes every save, and
+  rotates keys; the cost is running `git enc add` and `git enc update`, which
+  it tells you about.
+- **SOPS** encrypts the values in YAML, JSON or .env files, so a reviewer
+  sees which setting changed, gives each person or cloud key (KMS) their
+  own access, and never writes a plaintext file. It is the better choice
+  for production and for larger teams. For development secrets an app reads
+  from `.env`, SOPS users end up writing that file themselves and keeping
+  it current by hand; git-enc does that part, with any file type, and knows
+  your edit from a teammate's change.
+- **git-secret, BlackBox** give each person their own GPG key. git-enc's
+  shared age key is simpler to run and to hand over, and weaker at
+  revoking one person: that takes a new key for everyone.
+- **git-secrets, gitleaks, trufflehog** find secrets pasted into code.
+  They do not encrypt anything; use one alongside git-enc.
+
+A `.enc` file is a standard [age](https://age-encryption.org) file, so
+leaving git-enc never locks anything in: `age -d -i KEYFILE F.enc` opens it.
 
 ## Development
 

@@ -94,12 +94,11 @@ func (e *Engine) OutgoingPlaintext(refs string) ([]string, error) {
 	var bad []string
 	for _, p := range gitx.SplitZ(out) {
 		p = strings.TrimLeft(p, "\n")
-		if p == "" || seen[p] || strings.HasSuffix(p, ".enc") {
+		if p == "" || seen[p] {
 			continue
 		}
 		seen[p] = true
-		name := strings.TrimSuffix(p, ".incoming")
-		if b, _, err := e.Spec.Match(p); b != nil || err != nil || e.managed(p) || (name != p && e.managed(name)) || isTemp(p) {
+		if e.plaintextPath(p, nil) {
 			bad = append(bad, p)
 		}
 	}
@@ -163,16 +162,31 @@ func (e *Engine) stagedPlaintext() ([]string, error) {
 	}
 	var bad []string
 	for _, p := range staged {
-		if strings.HasSuffix(p, ".enc") {
-			continue
-		}
-		name := strings.TrimSuffix(p, ".incoming")
-		b, _, err := e.Spec.Match(p)
-		if b != nil || err != nil || byGit[p] || e.managed(p) || (name != p && e.managed(name)) || isTemp(p) {
+		if e.plaintextPath(p, byGit) {
 			bad = append(bad, p)
 		}
 	}
 	return bad, nil
+}
+
+// plaintextPath reports whether p, a path in the index or in a commit, is a
+// secret's plaintext or a copy git-enc makes of one: matched by a block
+// (as git-enc reads it, or, in byGit, as git does), managed by this clone
+// before, an .incoming beside a secret, or a temporary file.
+func (e *Engine) plaintextPath(p string, byGit map[string]bool) bool {
+	if strings.HasSuffix(p, ".enc") {
+		return false
+	}
+	name := strings.TrimSuffix(p, ".incoming")
+	b, _, err := e.Spec.Match(p)
+	if b != nil || err != nil || byGit[p] || e.managed(p) || isTemp(p) {
+		return true
+	}
+	if name != p {
+		nb, _, _ := e.Spec.Match(name)
+		return nb != nil || e.managed(name)
+	}
+	return false
 }
 
 // blockMatches lists the files in the index that git matches with the lines

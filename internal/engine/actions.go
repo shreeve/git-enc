@@ -371,6 +371,11 @@ func (e *Engine) Update(paths []string, opt UpdateOptions) ([]string, error) {
 		return []string{"everything is up to date"}, nil
 	}
 	for _, s := range targets {
+		if s.Kind == Outdated || s.Kind == Conflict || s.Kind == Diverged {
+			if w := e.rollbackWarning(s); w != "" {
+				out = append(out, w)
+			}
+		}
 		msg, err := e.updateOne(s, opt.Discard)
 		if err != nil {
 			return out, err
