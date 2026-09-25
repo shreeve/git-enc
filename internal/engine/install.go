@@ -255,8 +255,9 @@ func (e *Engine) Init(binary string) ([]string, error) {
 			return out, err
 		}
 	}
+	skip := e.SkippedKeys()
 	for _, b := range e.Spec.Blocks {
-		if e.blockKey(b) == nil {
+		if e.blockKey(b) == nil && !skip[b.Key] {
 			out = append(out, fmt.Sprintf("%s: import it with `git enc key add %s` (paste the key, then Ctrl-D), then run `git enc update`", e.noKeyMessage(b), b.Key))
 		}
 	}

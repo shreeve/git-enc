@@ -359,7 +359,7 @@ func (e *Engine) Update(paths []string, opt UpdateOptions) ([]string, error) {
 	if len(paths) == 0 {
 		// Say what cannot be brought up to date, rather than "up to date".
 		for _, s := range e.Secrets {
-			if s.Kind == NoKey {
+			if s.Kind == NoKey && !s.Skipped {
 				out = append(out, "skipped "+s.Path+": "+s.Message)
 			}
 		}

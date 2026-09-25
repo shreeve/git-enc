@@ -257,7 +257,7 @@ func (e *Engine) kinds(ks ...Kind) []string {
 	var out []string
 	for _, s := range e.Secrets {
 		for _, k := range ks {
-			if s.Kind == k {
+			if s.Kind == k && !s.Skipped {
 				out = append(out, s.Path)
 			}
 		}

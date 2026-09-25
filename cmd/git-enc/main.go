@@ -314,6 +314,8 @@ func printStatus(e *engine.Engine) {
 		switch why, skipped := e.Keys.Skipped[k.Name]; {
 		case k.Available:
 			fmt.Printf("key %s (%s): ok\n", k.Name, k.Fingerprint)
+		case k.Skipped:
+			fmt.Printf("key %s (%s): not yours (enc.skipKeys); its secrets are left alone\n", k.Name, orUnknown(k.Fingerprint))
 		case skipped:
 			fmt.Printf("key %s (%s): unusable — %s\n", k.Name, orUnknown(k.Fingerprint), why)
 		default:
@@ -327,7 +329,7 @@ func printStatus(e *engine.Engine) {
 		var rows []engine.ReportSecret
 		for _, s := range r.Secrets {
 			for _, st := range states {
-				if s.State == st {
+				if s.State == st && !s.Skipped {
 					rows = append(rows, s)
 				}
 			}
@@ -382,12 +384,22 @@ func printStatus(e *engine.Engine) {
 		}
 	}
 	if a, _ := e.NeedsAttention(); !a {
-		n := len(r.Secrets)
-		if n == 1 {
-			fmt.Println("\n1 secret, clean")
-		} else {
-			fmt.Printf("\n%d secrets, all clean\n", n)
+		n, skipped := 0, 0
+		for _, s := range r.Secrets {
+			if s.Skipped {
+				skipped++
+			} else {
+				n++
+			}
 		}
+		line := fmt.Sprintf("%d secrets, all clean", n)
+		if n == 1 {
+			line = "1 secret, clean"
+		}
+		if skipped > 0 {
+			line += fmt.Sprintf(" (%d more for keys you skip)", skipped)
+		}
+		fmt.Println("\n" + line)
 	}
 	for _, w := range e.Keys.Warnings {
 		fmt.Fprintln(os.Stderr, "warning:", w)
@@ -417,7 +429,7 @@ func cmdCheck(args []string) (code int, err error) {
 	}
 	counts := map[engine.Kind]int{}
 	for _, s := range e.Secrets {
-		if s.Kind != engine.Clean {
+		if s.Kind != engine.Clean && !s.Skipped {
 			counts[s.Kind]++
 		}
 	}
@@ -497,10 +509,10 @@ func cmdUpdate(args []string) (code int, err error) {
 		if len(paths) > 0 && !contains(paths, s.Path) {
 			continue
 		}
-		switch s.Kind {
-		case engine.NoKey:
+		switch {
+		case s.Kind == engine.NoKey && !s.Skipped:
 			return exitNoKey, nil
-		case engine.Conflict, engine.Diverged, engine.Merging, engine.Corrupt:
+		case s.Kind == engine.Conflict, s.Kind == engine.Diverged, s.Kind == engine.Merging, s.Kind == engine.Corrupt:
 			code = exitAttention
 		}
 	}
