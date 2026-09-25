@@ -13,23 +13,28 @@ jobs:
   release:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
       - name: test
         run: go test -count=1 ./...
       - name: package
         run: scripts/package-release.sh "$GITHUB_REF_NAME" dist
-      - uses: actions/attest-build-provenance@v2
+      - uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
         with:
           subject-path: "dist/*.tar.gz, dist/*.zip"
       - name: publish
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          cat > notes.md <<NOTES
-          Install on macOS or Linux:
+          # This version's section of CHANGELOG.md, then how to install.
+          awk -v tag="## ${GITHUB_REF_NAME}" '$0 == tag {on=1; next} on && /^## / {exit} on' CHANGELOG.md > notes.md
+          cat >> notes.md <<NOTES
+
+          ## Install
+
+          On macOS or Linux:
 
               brew install shreeve/tap/git-enc
 

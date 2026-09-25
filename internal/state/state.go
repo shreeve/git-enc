@@ -34,6 +34,9 @@ type Entry struct {
 	// Seen is a .enc blob the user has already been shown as F.incoming
 	// (or merged into F), so adding F again is a deliberate resolution.
 	Seen string `json:"seen,omitempty"`
+	// Kept is the sha256 of the plaintext when git-enc wrote F.incoming
+	// beside it: adding F unchanged would drop what F.incoming holds.
+	Kept string `json:"kept,omitempty"`
 	// Merge holds the unmerged stage blobs `git enc merge` resolved.
 	Merge string `json:"merge,omitempty"`
 }
@@ -154,24 +157,19 @@ func (c *Cache) Save() {
 }
 
 // Lock is an exclusive lock on a worktree's git-enc state.
-type Lock struct{ path string }
+type Lock struct {
+	path    string
+	untrack func()
+}
 
 // Acquire takes the lock at path, waiting up to five seconds. A lock older
 // than a minute is left over from a crashed process and is broken.
 func Acquire(path string) (*Lock, error) {
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return nil, err
-	}
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-		if err == nil {
-			f.WriteString(strconv.Itoa(os.Getpid()) + "\n")
-			f.Close()
-			return &Lock{path}, nil
-		}
-		if !errors.Is(err, os.ErrExist) {
-			return nil, err
+		l, err := TryAcquire(path)
+		if l != nil || err != nil {
+			return l, err
 		}
 		if fi, err := os.Stat(path); err == nil && time.Since(fi.ModTime()) > time.Minute {
 			os.Remove(path)
@@ -184,5 +182,27 @@ func Acquire(path string) (*Lock, error) {
 	}
 }
 
+// TryAcquire takes the lock at path if it is free, and returns nil if
+// another git-enc holds it.
+func TryAcquire(path string) (*Lock, error) {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return nil, err
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if errors.Is(err, os.ErrExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	f.WriteString(strconv.Itoa(os.Getpid()) + "\n")
+	f.Close()
+	// An interrupted git-enc must not leave the next one waiting.
+	return &Lock{path, fsx.Track(path)}, nil
+}
+
 // Release frees the lock.
-func (l *Lock) Release() { os.Remove(l.path) }
+func (l *Lock) Release() {
+	os.Remove(l.path)
+	l.untrack()
+}

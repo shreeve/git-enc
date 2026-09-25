@@ -25,6 +25,10 @@ type Block struct {
 	Fingerprint string // short key fingerprint; "" if the header omits it
 	Start, End  int    // 1-based line numbers of the two marker lines
 	Patterns    []*Pattern
+	// Lines holds every pattern line as written, including ones git-enc
+	// refuses: git still ignores what they match, so the pre-commit guard
+	// asks git about all of them.
+	Lines []string
 	// Unterminated blocks run to the end of the file; they are reported
 	// as problems and never edited.
 	Unterminated bool
@@ -117,6 +121,7 @@ func Parse(data []byte, ignoreCase bool) (*Spec, []Problem) {
 		if strings.TrimSpace(raw) == "" || strings.HasPrefix(raw, "#") {
 			continue
 		}
+		cur.Lines = append(cur.Lines, raw)
 		p, err := compile(raw, ignoreCase)
 		if err != "" {
 			probs = append(probs, Problem{n, err})
@@ -138,12 +143,14 @@ func Parse(data []byte, ignoreCase bool) (*Spec, []Problem) {
 // compile turns a gitignore pattern into a matcher, restricted to the forms
 // git-enc can reason about exactly: file patterns with *, ? and [...].
 func compile(raw string, fold bool) (*Pattern, string) {
-	pat := trimTrailingSpace(raw)
+	pat := TrimTrailingSpace(raw)
 	switch {
 	case strings.HasPrefix(pat, "!"):
 		return nil, "negated patterns (`!`) are not allowed in a git-enc block"
 	case strings.HasSuffix(pat, "/"):
 		return nil, fmt.Sprintf("directory pattern %q would also hide the .enc files; list files instead (e.g. %q)", pat, strings.TrimSuffix(pat, "/")+"/*")
+	case strings.Contains(pat, "[:"):
+		return nil, "character classes like `[[:digit:]]` are not supported in a git-enc block; use `[0-9]` or list the paths"
 	case strings.Contains(pat, "**"):
 		return nil, "`**` is not supported in a git-enc block; list the paths or use one `*` per directory level"
 	case strings.HasSuffix(pat, ".enc"):
@@ -191,9 +198,9 @@ func hasTrailingComment(pat string) bool {
 	return false
 }
 
-// trimTrailingSpace drops trailing spaces the way git does: a space escaped
-// with a backslash is kept.
-func trimTrailingSpace(s string) string {
+// TrimTrailingSpace drops trailing spaces the way git does in a
+// .gitignore file: a space escaped with a backslash is kept.
+func TrimTrailingSpace(s string) string {
 	for strings.HasSuffix(s, " ") && !strings.HasSuffix(s, "\\ ") {
 		s = s[:len(s)-1]
 	}
@@ -255,6 +262,20 @@ func (s *Spec) Match(rel string) (*Block, *Pattern, error) {
 		}
 	}
 	return hb, hp, nil
+}
+
+// Anchored reports whether a pattern that names a path from the root
+// (`/build/*.yml`, `config/app.yml`) matches rel, as opposed to only a
+// pattern for any directory (`.env`).
+func (s *Spec) Anchored(rel string) bool {
+	for _, b := range s.Blocks {
+		for _, p := range b.Patterns {
+			if p.anchored && p.Match(rel) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // Block returns the first block for the named key.

@@ -31,6 +31,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -71,7 +72,8 @@ type Secret struct {
 	Message string // why it is in this state
 	Action  string // the command that moves it forward
 
-	plain     []byte // nil if absent
+	plain     []byte // nil if absent (or unreadable: see plainErr)
+	plainErr  error  // the plaintext is there but cannot be read
 	PlainHash string
 	EncBlob   string // worktree F.enc blob id, "" if absent
 	EncHash   string // sha256 of the secret in the worktree F.enc
@@ -88,7 +90,12 @@ type Secret struct {
 	EncDeleted   bool
 	PlainTracked bool // git tracks the plaintext itself
 	NotIgnored   bool // git does not ignore the plaintext (a `!` rule)
-	entry        *state.Entry
+	PlainIgnored bool // git's ignore rules match the plaintext (tracked or not)
+	EncIgnored   bool // git's ignore rules match F.enc, so it can't be committed
+	// Skipped: no-key, for a key enc.skipKeys says this user does not hold
+	// on purpose (another group's block). It is listed but asks for nothing.
+	Skipped bool
+	entry   *state.Entry
 }
 
 // Problem is something wrong that is not tied to one secret's state.
@@ -112,18 +119,25 @@ type Engine struct {
 
 	ignoreCase bool
 	lock       *state.Lock
-	baseDir    string // per-worktree git-enc dir
+	baseDir    string                 // per-worktree git-enc dir
+	ignored    map[string]bool        // paths git ignores, from this scan's one check-ignore
+	shared     map[*spec.Block]string // blocks whose key another block uses too
 }
 
 // Open opens the repository at dir, takes the git-enc lock, and scans it.
-func Open(dir string) (*Engine, error) { return open(dir, true) }
+func Open(dir string) (*Engine, error) { return open(dir, true, false) }
+
+// OpenStatus opens the repository for a command that only reports (status,
+// check, diff): it takes the lock if it is free, to save what it learns,
+// and otherwise scans without saving rather than wait for another git-enc.
+func OpenStatus(dir string) (*Engine, error) { return open(dir, false, true) }
 
 // OpenReadOnly scans without taking the lock or saving anything, for hooks:
 // they must work (and the pre-commit guard must hold) even while another
 // git-enc runs or after one was killed holding the lock.
-func OpenReadOnly(dir string) (*Engine, error) { return open(dir, false) }
+func OpenReadOnly(dir string) (*Engine, error) { return open(dir, false, false) }
 
-func open(dir string, write bool) (*Engine, error) {
+func open(dir string, write, try bool) (*Engine, error) {
 	repo, err := gitx.Open(dir)
 	if err != nil {
 		return nil, err
@@ -139,8 +153,15 @@ func open(dir string, write bool) (*Engine, error) {
 		}
 		return nil, err
 	}
-	if write {
+	switch {
+	case write:
 		if e.lock, err = state.Acquire(filepath.Join(e.baseDir, "lock")); err != nil {
+			return nil, err
+		}
+	case try && !repo.Rebasing():
+		// Mid-rebase, what it would learn (a commit about to be rewritten
+		// as committed) would not hold once the rebase ends: read only.
+		if e.lock, err = state.TryAcquire(filepath.Join(e.baseDir, "lock")); err != nil {
 			return nil, err
 		}
 	}
@@ -151,7 +172,7 @@ func open(dir string, write bool) (*Engine, error) {
 	if e.Keys, err = keys.Load(); err != nil {
 		return fail(err)
 	}
-	if write {
+	if e.lock != nil {
 		// Before anything is written: keep temporary files out of commits.
 		if err := e.syncExclude(); err != nil {
 			return fail(err)
@@ -203,6 +224,7 @@ func (e *Engine) Scan() error {
 	for _, p := range probs {
 		e.Problems = append(e.Problems, Problem{Code: "gitignore", Path: ".gitignore", Line: p.Line, Message: p.Msg})
 	}
+	e.findSharedKeys()
 
 	paths, err := e.candidates()
 	if err != nil {
@@ -245,6 +267,10 @@ func (e *Engine) Scan() error {
 	if err := e.classify(); err != nil {
 		return err
 	}
+	skip := e.SkippedKeys()
+	for _, s := range e.Secrets {
+		s.Skipped = s.Kind == NoKey && s.Key == nil && s.Block != nil && skip[s.Block.Key]
+	}
 	kept := e.Secrets[:0]
 	for _, s := range e.Secrets {
 		if s.Kind != "" {
@@ -253,6 +279,43 @@ func (e *Engine) Scan() error {
 	}
 	e.Secrets = kept
 	return nil
+}
+
+// findSharedKeys marks blocks that use the same key as another block. Each
+// block has its own key; two sharing one means .gitignore was changed to
+// point one group's secrets at another group's key, so git-enc encrypts
+// and writes nothing for either until it is fixed.
+func (e *Engine) findSharedKeys() {
+	e.shared = map[*spec.Block]string{}
+	first := map[string]*spec.Block{}
+	for _, b := range e.Spec.Blocks {
+		ids := []string{"name " + b.Key}
+		if b.Fingerprint != "" {
+			ids = append(ids, "fingerprint "+b.Fingerprint)
+		}
+		for _, id := range ids {
+			o := first[id]
+			if o == nil {
+				first[id] = b
+				continue
+			}
+			msg := fmt.Sprintf("the git-enc blocks at .gitignore lines %d and %d use the same key (%s); each block needs its own key. If you did not do this, someone changed .gitignore: check `git log -p .gitignore`", o.Start, b.Start, id)
+			e.shared[o], e.shared[b] = msg, msg
+			e.Problems = append(e.Problems, Problem{Code: "shared-key", Path: ".gitignore", Line: b.Start, Message: msg})
+			break
+		}
+	}
+}
+
+// SkippedKeys are the key names in enc.skipKeys (separated by spaces or
+// commas): blocks whose key this user does not hold on purpose, such as
+// another group's secrets, or a CI job's.
+func (e *Engine) SkippedKeys() map[string]bool {
+	res := map[string]bool{}
+	for _, k := range strings.FieldsFunc(e.Repo.ConfigString("enc.skipKeys"), func(r rune) bool { return r == ',' || r == ' ' || r == '\t' }) {
+		res[k] = true
+	}
+	return res
 }
 
 func (e *Engine) managed(p string) bool {
@@ -267,25 +330,26 @@ func (e *Engine) managed(p string) bool {
 
 // candidates lists every path that might be a secret: names of *.enc files
 // git knows about, plaintext files the blocks match, and paths git-enc has
-// managed before.
+// managed before. A pattern for any directory (`.env`) does not reach into
+// a directory git ignores anyway (a fixture .env under node_modules/): its
+// .enc could never be committed. A path a pattern names explicitly
+// (`/build/*.yml`) is kept, so an ignored directory is reported.
 func (e *Engine) candidates() ([]string, error) {
 	set := map[string]bool{}
-	for _, args := range [][]string{
-		{"ls-files", "-z", "--cached", "--", "*.enc"},
-		{"ls-files", "-z", "--others", "--exclude-standard", "--", "*.enc"},
-	} {
-		out, err := e.Repo.Git(args...)
-		if err != nil {
-			return nil, err
-		}
-		for _, p := range gitx.SplitZ(out) {
-			if name := strings.TrimSuffix(p, ".enc"); name != p && name != "" && !strings.HasSuffix(name, "/") {
-				set[name] = true
-			}
+	var maybe []string // kept unless inside an ignored directory
+	encs, err := e.Repo.Git("ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", "*.enc")
+	if err != nil {
+		return nil, err
+	}
+	for _, p := range gitx.SplitZ(encs) {
+		if name := strings.TrimSuffix(p, ".enc"); name != p && name != "" && !strings.HasSuffix(name, "/") {
+			set[name] = true
 		}
 	}
+	// Blocks hold no `!` rules, so every block's patterns can go in one
+	// call: a path matches the union exactly when it matches one block.
+	var globs []string
 	for _, b := range e.Spec.Blocks {
-		var globs []string
 		for _, p := range b.Patterns {
 			if lit := p.Literal(); lit != "" {
 				if fi, err := os.Lstat(e.Repo.Abs(lit)); err == nil && !fi.IsDir() {
@@ -293,31 +357,38 @@ func (e *Engine) candidates() ([]string, error) {
 				}
 				continue
 			}
-			globs = append(globs, "--exclude="+strings.TrimRight(p.Raw, " "))
+			globs = append(globs, "--exclude="+spec.TrimTrailingSpace(p.Raw))
 		}
-		if len(globs) == 0 {
-			continue
-		}
+	}
+	if len(globs) > 0 {
 		// git itself decides which files the patterns match: untracked
-		// ones, and tracked ones (plaintext committed before it was listed).
-		for _, which := range []string{"--others", "--cached"} {
-			args := append([]string{"ls-files", "-z", which, "--ignored"}, globs...)
-			out, err := e.Repo.Git(args...)
-			if err != nil {
-				return nil, err
+		// ones ("?"), and tracked ones (plaintext committed before it was
+		// listed), in one call told apart by -t.
+		args := append([]string{"ls-files", "-z", "-t", "--cached", "--others", "--ignored"}, globs...)
+		out, err := e.Repo.Git(args...)
+		if err != nil {
+			return nil, err
+		}
+		for _, rec := range gitx.SplitZ(out) {
+			tag, p, ok := strings.Cut(rec, " ")
+			if !ok {
+				continue
 			}
-			for _, p := range gitx.SplitZ(out) {
-				if !strings.HasSuffix(p, ".enc") && !strings.HasSuffix(p, ".incoming") {
-					set[p] = true
-				}
+			switch {
+			case strings.HasSuffix(p, ".enc"), strings.HasSuffix(p, ".incoming"):
+			case tag == "?" && !e.Spec.Anchored(p):
+				maybe = append(maybe, p)
+			default:
+				set[p] = true
 			}
 		}
 	}
-	for _, m := range e.State.Managed {
-		set[m] = true
-	}
+	maybe = append(maybe, e.State.Managed...)
 	for p := range e.State.Secrets {
-		set[p] = true
+		maybe = append(maybe, p)
+	}
+	if err := e.dropIgnoredDirs(maybe, set); err != nil {
+		return nil, err
 	}
 	var out []string
 	for p := range set {
@@ -325,6 +396,77 @@ func (e *Engine) candidates() ([]string, error) {
 	}
 	sort.Strings(out)
 	return out, nil
+}
+
+// dropIgnoredDirs adds each path to set unless git ignores a directory
+// above it, or it already is there. The one check-ignore it runs also
+// answers, for checkIgnores, whether git ignores each candidate and its
+// .enc.
+func (e *Engine) dropIgnoredDirs(paths []string, set map[string]bool) error {
+	seen := map[string]bool{}
+	var list []string
+	// git refuses the whole call for a path beneath a symlink, so those
+	// are not asked about (no secret can be there: Scan refuses them).
+	ask := func(p string) {
+		if !seen[p] && e.askable(p) {
+			seen[p] = true
+			list = append(list, p)
+		}
+	}
+	for _, p := range paths {
+		if d := path.Dir(p); d != "." {
+			ask(d)
+		}
+	}
+	for _, group := range [][]string{paths, setKeys(set)} {
+		for _, p := range group {
+			if spec.CheckPath(p) == nil {
+				ask(p)
+				ask(p + ".enc")
+			}
+		}
+	}
+	// git reports a directory inside an ignored one as ignored too.
+	ignored, err := e.checkIgnore(list)
+	if err != nil {
+		return err
+	}
+	e.ignored = ignored
+	for _, p := range paths {
+		if !ignored[path.Dir(p)] {
+			set[p] = true
+		}
+	}
+	return nil
+}
+
+// askable reports whether git can be asked about rel: no directory above
+// it is a symlink (or not a directory at all).
+func (e *Engine) askable(rel string) bool {
+	d := path.Dir(rel)
+	if d == "." {
+		return true
+	}
+	cur := e.Repo.Root
+	for _, c := range strings.Split(d, "/") {
+		cur = filepath.Join(cur, c)
+		fi, err := os.Lstat(cur)
+		if os.IsNotExist(err) {
+			return true
+		}
+		if err != nil || !fi.IsDir() {
+			return false
+		}
+	}
+	return true
+}
+
+func setKeys(set map[string]bool) []string {
+	out := make([]string, 0, len(set))
+	for p := range set {
+		out = append(out, p)
+	}
+	return out
 }
 
 // readIndex fills in the index and HEAD blobs of every F.enc.
@@ -340,17 +482,11 @@ func (e *Engine) readIndex() error {
 		plain[s.Path] = s
 		pathspec = append(pathspec, ":(literal)"+s.EncPath)
 	}
-	var plainspec []string
 	for _, s := range e.Secrets {
-		plainspec = append(plainspec, ":(literal)"+s.Path)
+		pathspec = append(pathspec, ":(literal)"+s.Path)
 	}
-	if out, err := e.Repo.Git(append([]string{"ls-files", "-z", "--"}, plainspec...)...); err == nil {
-		for _, p := range gitx.SplitZ(out) {
-			if s := plain[p]; s != nil {
-				s.PlainTracked = true
-			}
-		}
-	}
+	// One call for both: whether git tracks each plaintext, and each
+	// F.enc's index entries.
 	out, err := e.Repo.Git(append([]string{"ls-files", "-z", "--stage", "--"}, pathspec...)...)
 	if err != nil {
 		return err
@@ -362,6 +498,9 @@ func (e *Engine) readIndex() error {
 			continue
 		}
 		f := strings.Fields(rec[:tab])
+		if s := plain[rec[tab+1:]]; s != nil {
+			s.PlainTracked = true
+		}
 		s := enc[rec[tab+1:]]
 		if s == nil || len(f) != 3 {
 			continue
@@ -373,7 +512,7 @@ func (e *Engine) readIndex() error {
 		}
 	}
 	if e.Repo.HasHead() {
-		out, err := e.Repo.Git(append([]string{"ls-tree", "-r", "-z", "--full-tree", "HEAD", "--"}, pathspec...)...)
+		out, err := e.Repo.Git(append([]string{"ls-tree", "-r", "-z", "--full-tree", "HEAD", "--"}, pathspec[:len(e.Secrets)]...)...)
 		if err != nil {
 			return err
 		}
@@ -399,6 +538,7 @@ func (e *Engine) readFiles() error {
 		s.Key = e.blockKey(s.Block)
 		plain, err := fsx.ReadRegular(e.Repo.Root, s.Path)
 		if err != nil {
+			s.plainErr = err
 			e.Problems = append(e.Problems, Problem{Code: "unsafe-path", Path: s.Path, Message: err.Error()})
 		} else if plain != nil {
 			s.plain = plain
@@ -434,42 +574,19 @@ func (e *Engine) readFiles() error {
 	return e.checkIgnores()
 }
 
-// checkIgnores asks git, in one call each, whether every plaintext is
+// checkIgnores uses git's answers to whether every plaintext is
 // ignored (it must be: otherwise it can be committed) and every F.enc is
 // not (otherwise it can't be).
 func (e *Engine) checkIgnores() error {
 	if len(e.Secrets) == 0 {
 		return nil
 	}
-	ignored := func(paths []string) (map[string]bool, error) {
-		out, err := e.Repo.GitIn([]byte(strings.Join(paths, "\x00")+"\x00"), "check-ignore", "-z", "--no-index", "--stdin")
-		var ge *gitx.Error
-		if err != nil && !(errors.As(err, &ge) && ge.ExitCode() == 1) {
-			return nil, err
-		}
-		res := map[string]bool{}
-		for _, p := range gitx.SplitZ(out) {
-			res[p] = true
-		}
-		return res, nil
-	}
-	var plains, encs []string
+	pi, ei := e.ignored, e.ignored // asked with the candidates, in one call
 	for _, s := range e.Secrets {
-		plains = append(plains, s.Path)
-		encs = append(encs, s.EncPath)
-	}
-	pi, err := ignored(plains)
-	if err != nil {
-		return err
-	}
-	ei, err := ignored(encs)
-	if err != nil {
-		return err
-	}
-	for _, s := range e.Secrets {
-		if s.Block == nil {
-			continue
+		if s.Block == nil || s.plain == nil && s.EncBlob == "" && !s.PlainTracked {
+			continue // nothing there to commit by mistake, or to fail to commit
 		}
+		s.PlainIgnored, s.EncIgnored = pi[s.Path], ei[s.EncPath]
 		if !pi[s.Path] && !s.PlainTracked {
 			s.NotIgnored = true
 			e.Problems = append(e.Problems, Problem{Code: "not-ignored", Path: s.Path,
@@ -477,7 +594,7 @@ func (e *Engine) checkIgnores() error {
 		}
 		if ei[s.EncPath] {
 			e.Problems = append(e.Problems, Problem{Code: "enc-ignored", Path: s.EncPath,
-				Message: "git ignores this encrypted file, so it can't be committed; add `!*.enc` after the rule that matches it (`git check-ignore -v " + s.EncPath + "` names it), or narrow that rule"})
+				Message: "git ignores this encrypted file, so it can't be committed; add `!*.enc` after the rule that matches it (`git check-ignore -v " + s.EncPath + "` names it; a rule for a whole directory, like `config/`, must become `config/*` first), or narrow that rule"})
 		}
 		if s.PlainTracked {
 			e.Problems = append(e.Problems, Problem{Code: "tracked-plaintext", Path: s.Path,
@@ -487,15 +604,42 @@ func (e *Engine) checkIgnores() error {
 	return nil
 }
 
+// checkIgnore asks git, in one call, which of paths it ignores.
+func (e *Engine) checkIgnore(paths []string) (map[string]bool, error) {
+	res := map[string]bool{}
+	if len(paths) == 0 {
+		return res, nil
+	}
+	out, err := e.Repo.GitIn([]byte(strings.Join(paths, "\x00")+"\x00"), "check-ignore", "-z", "--no-index", "--stdin")
+	var ge *gitx.Error
+	if err != nil && !(errors.As(err, &ge) && ge.ExitCode() == 1) {
+		return nil, err
+	}
+	for _, p := range gitx.SplitZ(out) {
+		res[p] = true
+	}
+	return res, nil
+}
+
 // blockKey returns the key that opens a block's secrets, or nil.
+//
+// .gitignore is written by everyone who can push, so a block's header only
+// selects a key file whose name and fingerprint both match it (a key from
+// $GIT_ENC_KEY, which has no name, by fingerprint). Changing the header
+// alone can never point a block at another of the user's keys.
 func (e *Engine) blockKey(b *spec.Block) *keys.Key {
-	if b == nil {
+	if b == nil || e.shared[b] != "" {
 		return nil
 	}
-	if b.Fingerprint != "" {
-		return e.Keys.ByFingerprint(b.Fingerprint)
+	if b.Fingerprint == "" {
+		return e.Keys.ByName(b.Key)
 	}
-	return e.Keys.ByName(b.Key)
+	for _, k := range e.Keys.Keys {
+		if k.Fingerprint == b.Fingerprint && (k.File == "" || k.Name == b.Key) {
+			return k
+		}
+	}
+	return nil
 }
 
 // body returns the decrypted secret in the worktree F.enc.
@@ -503,6 +647,23 @@ func (e *Engine) body(s *Secret) ([]byte, error) {
 	if s.encBody != nil {
 		return s.encBody, nil
 	}
+	data, err := e.encData(s)
+	if err != nil {
+		return nil, err
+	}
+	body, err := e.open(s, data)
+	if err != nil {
+		return nil, err
+	}
+	s.encBody = body
+	s.EncHash = sum(body)
+	e.Cache.Put(s.EncBlob, s.EncHash)
+	return body, nil
+}
+
+// encData returns the ciphertext of the worktree F.enc (git's copy when
+// the file is deleted).
+func (e *Engine) encData(s *Secret) ([]byte, error) {
 	var data []byte
 	if s.EncDeleted {
 		blobs, err := e.Repo.Blobs([]string{s.EncBlob})
@@ -519,23 +680,32 @@ func (e *Engine) body(s *Secret) ([]byte, error) {
 	if data == nil {
 		return nil, fmt.Errorf("%s does not exist", s.EncPath)
 	}
-	body, err := e.open(s, data)
-	if err != nil {
-		return nil, err
-	}
-	s.encBody = body
-	s.EncHash = sum(body)
-	e.Cache.Put(s.EncBlob, s.EncHash)
-	return body, nil
+	return data, nil
 }
 
-// open decrypts one version of s's ciphertext.
+// open decrypts one version of s's ciphertext with its block's key.
 func (e *Engine) open(s *Secret, data []byte) ([]byte, error) {
 	if s.Key == nil {
 		return nil, errNoKey
 	}
 	_, body, err := envelope.Open(data, s.Path, s.Key.Identity)
 	return body, err
+}
+
+// sealedBy returns which of the user's keys can open the worktree F.enc
+// that the block's key cannot, or nil. It only names the key in a message:
+// ciphertext is only ever trusted when its block's key opens it.
+func (e *Engine) sealedBy(s *Secret) *keys.Key {
+	data, err := e.encData(s)
+	if err != nil {
+		return nil
+	}
+	for _, k := range e.Keys.Keys {
+		if _, _, err := envelope.Open(data, s.Path, k.Identity); err == nil {
+			return k
+		}
+	}
+	return nil
 }
 
 var errNoKey = errors.New("no key")
@@ -595,6 +765,13 @@ func (e *Engine) committed(need map[*Secret][]string) (map[*Secret]map[string]bo
 	if len(ask) == 0 {
 		return res, nil
 	}
+	// Ask about every secret at once: compare may need the others next,
+	// and one `git log` walks history once however many paths it follows.
+	for _, s := range e.Secrets {
+		if askFor[s.EncPath] == nil {
+			ask = append(ask, s.EncPath)
+		}
+	}
 	hist, err := e.Repo.History(ask)
 	if err != nil {
 		return nil, err
@@ -620,6 +797,11 @@ func (e *Engine) promote() error {
 		if s.Key == nil || len(s.Unmerged) > 0 {
 			continue
 		}
+		if e.lock == nil && !e.differs(s) {
+			// Read-only (a hook): nothing is saved, and the base only
+			// matters when the plaintext and F.enc differ.
+			continue
+		}
 		if s.entry.Pending != "" {
 			need[s] = append(need[s], s.entry.Pending)
 		}
@@ -642,7 +824,14 @@ func (e *Engine) promote() error {
 				continue
 			}
 			if b == s.entry.Pending {
-				if h, ok := e.Cache.Hashes[b]; ok {
+				// The cache may have been deleted since `git enc add`.
+				blobs := map[string][]byte{}
+				if _, ok := e.Cache.Hashes[b]; !ok {
+					if blobs, err = e.Repo.Blobs([]string{b}); err != nil {
+						return err
+					}
+				}
+				if h, err := e.hashOf(s, b, blobs); err == nil {
 					s.entry.BaseBlob, s.entry.BaseHash = b, h
 				}
 				s.entry.Pending = ""
@@ -653,6 +842,16 @@ func (e *Engine) promote() error {
 		}
 	}
 	return nil
+}
+
+// differs reports whether s has a plaintext and a readable F.enc that
+// differ: the only case classify consults the base for.
+func (e *Engine) differs(s *Secret) bool {
+	if s.plain == nil || s.EncBlob == "" || s.Block == nil {
+		return false
+	}
+	_, err := e.body(s)
+	return err == nil && s.EncHash != s.PlainHash
 }
 
 // classify sets each secret's Kind.
@@ -670,29 +869,32 @@ func (e *Engine) classify() error {
 				delete(e.State.Secrets, s.Path)
 				continue // nothing left to report
 			}
-			s.set(Orphaned, "no longer listed in a git-enc block of .gitignore", "")
+			s.set(Orphaned, "no longer listed in a git-enc block of .gitignore; declare it again with `git enc add "+s.Path+"`, or delete it", "git enc add "+s.Path)
 			if s.EncBlob != "" {
-				s.Message = "no longer listed in a git-enc block, but " + s.EncPath + " still exists"
+				s.Message = "no longer listed in a git-enc block, but " + s.EncPath + " still exists; declare it again with `git enc add " + s.Path + "`, or delete both"
 			}
 			continue
 		case len(s.Unmerged) > 0:
 			s.set(Merging, "git has a merge conflict on "+s.EncPath, "git enc merge "+s.Path)
 			continue
+		case s.plainErr != nil:
+			// Never "missing": update would write over what may be an edit.
+			s.set(Corrupt, "cannot read "+s.Path+" ("+s.plainErr.Error()+"); git-enc will not touch it until it can", "")
+			continue
 		case s.EncBlob == "":
 			if s.plain == nil {
 				continue // declared, but there is nothing yet
 			}
-			msg := "not encrypted yet"
-			if s.HeadBlob != "" {
-				msg = s.EncPath + " is missing from the worktree"
-			}
-			s.set(New, msg, "git enc add "+s.Path)
+			s.set(New, "not encrypted yet", "git enc add "+s.Path)
 			continue
 		case s.Key == nil:
 			s.set(NoKey, e.noKeyMessage(s.Block), "git enc key add "+s.Block.Key)
 			continue
 		}
 		defer func(s *Secret) {
+			if s.EncDeleted && strings.Contains(s.Message, " is deleted; ") {
+				return
+			}
 			if s.EncDeleted && s.Message != "" {
 				s.Message += " (" + s.EncPath + " is deleted in the worktree; `git enc update` restores it)"
 			} else if s.EncDeleted {
@@ -703,15 +905,22 @@ func (e *Engine) classify() error {
 			if errors.Is(err, envelope.ErrPath) {
 				s.set(Corrupt, s.EncPath+" "+err.Error(), "")
 			} else if isNoMatch(err) {
-				s.set(NoKey, fmt.Sprintf("key %s cannot decrypt %s (it was encrypted with a different key)", s.Block.Key, s.EncPath), "")
+				if k := e.sealedBy(s); k != nil {
+					s.set(NoKey, fmt.Sprintf("%s is encrypted with your key %s, not %s as its block in .gitignore says. If you moved it to that block, `git enc rekey %s %s %s` re-encrypts it; if not, someone changed .gitignore: check `git log -p .gitignore`", s.EncPath, k.Name, s.Block.Key, k.Name, s.Block.Key, s.Path), "")
+				} else {
+					s.set(NoKey, fmt.Sprintf("key %s cannot decrypt %s (it was encrypted with a different key)", s.Block.Key, s.EncPath), "")
+				}
 			} else {
-				s.set(Corrupt, s.EncPath+": "+err.Error(), "")
+				s.set(Corrupt, s.EncPath+" cannot be decrypted ("+err.Error()+"); if you changed it, restore git's copy with `git restore "+s.EncPath+"`", "")
 			}
 			continue
 		}
 		switch {
 		case s.plain == nil:
 			s.set(Missing, "no plaintext yet", "git enc update "+s.Path)
+		case s.PlainHash == s.EncHash && s.EncDeleted:
+			// Committing now would delete the only encrypted copy.
+			s.set(Missing, s.EncPath+" is deleted; `git enc update` restores it (to stop encrypting "+s.Path+", remove its line from .gitignore)", "git enc update "+s.Path)
 		case s.PlainHash == s.EncHash:
 			s.set(Clean, "", "")
 		default:
@@ -732,7 +941,7 @@ func (e *Engine) compare(list []*Secret) error {
 		if (s.entry.Seen != "" && s.entry.Seen == s.EncBlob) || (s.entry.Pending != "" && s.entry.Pending == s.EncBlob) {
 			continue
 		}
-		need[s] = []string{s.entry.BaseBlob, s.EncBlob}
+		need[s] = []string{s.entry.BaseBlob}
 	}
 	com, err := e.committed(need)
 	if err != nil {
@@ -810,12 +1019,21 @@ func (e *Engine) decide(s *Secret, base string) {
 func (s *Secret) set(k Kind, msg, action string) { s.Kind, s.Message, s.Action = k, msg, action }
 
 func (e *Engine) noKeyMessage(b *spec.Block) string {
+	if msg := e.shared[b]; msg != "" {
+		return msg
+	}
 	if why, ok := e.Keys.Skipped[b.Key]; ok {
 		return why
 	}
 	if b.Fingerprint != "" {
+		if k := e.Keys.ByFingerprint(b.Fingerprint); k != nil && k.File != "" && k.Name != b.Key {
+			return fmt.Sprintf("the block for key %s has the fingerprint of your key %s (%s); git-enc will not use %s for it. If you did not do this, someone changed .gitignore: check `git log -p .gitignore`", b.Key, k.Name, b.Fingerprint, k.Name)
+		}
 		if k := e.Keys.ByName(b.Key); k != nil {
 			return fmt.Sprintf("your key %q is %s, but this repo uses %s %s", b.Key, k.Fingerprint, b.Key, b.Fingerprint)
+		}
+		if os.Getenv("GIT_ENC_KEY") != "" {
+			return fmt.Sprintf("you don't have key %s (%s): no key in $GIT_ENC_KEY has that fingerprint", b.Key, b.Fingerprint)
 		}
 		return fmt.Sprintf("you don't have key %s (%s)", b.Key, b.Fingerprint)
 	}

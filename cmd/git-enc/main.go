@@ -11,16 +11,29 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"syscall"
 
 	"github.com/shreeve/git-enc/internal/engine"
+	"github.com/shreeve/git-enc/internal/envelope"
 	"github.com/shreeve/git-enc/internal/fsx"
 	"github.com/shreeve/git-enc/internal/keys"
 )
 
-// version is set at release time with -ldflags "-X main.version=…".
-var version = "0.1.0-dev"
+// version is set at release time with -ldflags "-X main.version=…"; a
+// `go install …@vX.Y.Z` build reads it from the module instead.
+var version = ""
+
+func versionString() string {
+	if version != "" {
+		return version
+	}
+	if bi, ok := debug.ReadBuildInfo(); ok && bi.Main.Version != "" && bi.Main.Version != "(devel)" {
+		return strings.TrimPrefix(bi.Main.Version, "v")
+	}
+	return "dev"
+}
 
 // protocol is the version of the `status --json` contract.
 const protocol = 1
@@ -46,21 +59,33 @@ an encrypted F.enc beside each one):
 
 Everyday commands:
     git enc status             which secrets you edited, which changed in git
+      --json                     for tools; --exit-code: exit as check does
     git enc add FILE… | --all  encrypt your edits and stage the .enc files
+      --key NAME                 declare new files in the block for key NAME
+      --force                    overwrite a newer committed version
     git enc update [FILE…]     bring your copies up to date (never loses edits)
+      --discard FILE…            take the committed version (yours is backed up)
     git enc diff [FILE…]       show your edits against the committed version
     git enc merge [FILE…]      resolve a git merge/rebase conflict on a secret
 
 Setup:
-    git enc init               set up this clone (hooks; decrypts what you're missing)
-    git enc key new NAME       create a key; share it once, out of band
+    git enc init               set up this clone: hooks, merging of secrets,
+                               and the plaintext of every secret you can read
+    git enc key new NAME       create a key; save it in a password manager
     git enc key add NAME       import a key someone shared (reads stdin)
     git enc key show NAME      print a key (e.g. | pbcopy)
     git enc key list           your keys
+    git enc rekey OLD NEW      move every block from key OLD to key NEW and
+                               re-encrypt its secrets (when someone leaves)
+    git enc rekey OLD NEW FILE…  re-encrypt secrets whose line you moved into
+                               the block for key NEW
 
 Other:
     git enc check              quiet check for scripts: exit 3 if anything needs doing
-    git enc cat FILE           decrypt a .enc or a backup to stdout
+    git enc verify [RANGE]     for CI, no key needed: no plaintext committed (in
+                               RANGE's commits too, e.g. origin/main..HEAD), every
+                               .enc encrypted, .gitignore sound; exit 3 if not
+    git enc cat FILE           decrypt a .enc or a backup to stdout (- for stdin)
     git enc version [--json]
 
 Exit codes: 0 ok, 1 error, 2 usage, 3 needs attention, 4 missing key.
@@ -72,7 +97,7 @@ func main() {
 	signal.Notify(sig, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 	go func() {
 		<-sig
-		fsx.RemoveTemps()
+		fsx.Cleanup()
 		os.Exit(130)
 	}()
 	os.Exit(run(os.Args[1:]))
@@ -109,11 +134,21 @@ func run(args []string) int {
 		code, err = cmdKey(rest)
 	case "cat":
 		code, err = cmdCat(rest)
+	case "verify":
+		code, err = cmdVerify(rest)
+	case "rekey":
+		code, err = cmdRekey(rest)
 	case "hook":
 		return cmdHook(rest)
+	case "merge-driver":
+		return cmdMergeDriver(rest)
 	default:
 		fmt.Fprintf(os.Stderr, "git enc: unknown command %q (see `git enc help`)\n", cmd)
 		return exitUsage
+	}
+	if errors.As(err, &helpRequested{}) {
+		fmt.Print(usage)
+		return exitOK
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "git enc:", err)
@@ -149,11 +184,18 @@ func flags(name string) *flag.FlagSet {
 }
 
 func parse(fs *flag.FlagSet, args []string) error {
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(args); errors.Is(err, flag.ErrHelp) {
+		return helpRequested{}
+	} else if err != nil {
 		return usageError{err.Error()}
 	}
 	return nil
 }
+
+// helpRequested is -h or --help after a command: print the usage, exit 0.
+type helpRequested struct{}
+
+func (helpRequested) Error() string { return "help requested" }
 
 func isTTY(f *os.File) bool {
 	fi, err := f.Stat()
@@ -163,6 +205,15 @@ func isTTY(f *os.File) bool {
 // open opens the repository around the current directory.
 func open() (*engine.Engine, error) {
 	return engine.Open(".")
+}
+
+// closeEngine saves the engine's state: deferred with a command's named
+// results, it turns a failed save into the command's error, since a lost
+// save can make git-enc misjudge a secret later.
+func closeEngine(e *engine.Engine, code *int, err *error) {
+	if cerr := e.Close(); cerr != nil && *err == nil {
+		*code, *err = exitError, fmt.Errorf("saving git-enc state: %w", cerr)
+	}
 }
 
 // relPaths turns command-line paths (relative to the current directory)
@@ -189,7 +240,7 @@ func relPaths(e *engine.Engine, args []string) ([]string, error) {
 			p = filepath.Join(real, filepath.Base(p))
 		}
 		rel, err := filepath.Rel(root, p)
-		if err != nil || rel == "." || strings.HasPrefix(rel, "..") {
+		if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 			return nil, fmt.Errorf("%s is outside the repository", a)
 		}
 		rel = filepath.ToSlash(rel)
@@ -212,26 +263,26 @@ func cmdVersion(args []string) (int, error) {
 		return exitUsage, err
 	}
 	if *asJSON {
-		out, _ := json.Marshal(map[string]any{"version": version, "protocol": protocol})
+		out, _ := json.Marshal(map[string]any{"version": versionString(), "protocol": protocol})
 		fmt.Println(string(out))
 	} else {
-		fmt.Println("git-enc", version)
+		fmt.Println("git-enc", versionString())
 	}
 	return exitOK, nil
 }
 
-func cmdStatus(args []string) (int, error) {
+func cmdStatus(args []string) (code int, err error) {
 	fs := flags("status")
 	asJSON := fs.Bool("json", false, "")
 	exitCode := fs.Bool("exit-code", false, "")
 	if err := parse(fs, args); err != nil {
 		return exitUsage, err
 	}
-	e, err := open()
+	e, err := engine.OpenStatus(".")
 	if err != nil {
 		return exitError, err
 	}
-	defer e.Close()
+	defer closeEngine(e, &code, &err)
 	if *asJSON {
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
@@ -265,17 +316,25 @@ func printStatus(e *engine.Engine) {
 		return
 	}
 	for _, k := range r.Keys {
-		if k.Available {
+		switch why, skipped := e.Keys.Skipped[k.Name]; {
+		case k.Available:
 			fmt.Printf("key %s (%s): ok\n", k.Name, k.Fingerprint)
-		} else {
+		case k.Skipped:
+			fmt.Printf("key %s (%s): not yours (enc.skipKeys); its secrets are left alone\n", k.Name, orUnknown(k.Fingerprint))
+		case skipped:
+			fmt.Printf("key %s (%s): unusable — %s\n", k.Name, orUnknown(k.Fingerprint), why)
+		default:
 			fmt.Printf("key %s (%s): not on this machine — `git enc key add %s`\n", k.Name, orUnknown(k.Fingerprint), k.Name)
 		}
+	}
+	if e.SetupNeeded() {
+		fmt.Println("this clone is not set up: run `git enc init` (hooks that keep plaintext out of commits, and merging of secrets)")
 	}
 	group := func(title string, states ...engine.Kind) {
 		var rows []engine.ReportSecret
 		for _, s := range r.Secrets {
 			for _, st := range states {
-				if s.State == st {
+				if s.State == st && !s.Skipped {
 					rows = append(rows, s)
 				}
 			}
@@ -292,10 +351,19 @@ func printStatus(e *engine.Engine) {
 			fmt.Println(line)
 		}
 	}
-	var staged []string
+	var staged, unstaged []string
 	for _, s := range r.Secrets {
-		if s.State == engine.Clean && s.Staged {
+		switch {
+		case s.State == engine.Clean && s.EncDirty:
+			unstaged = append(unstaged, s.Path)
+		case s.State == engine.Clean && s.Staged:
 			staged = append(staged, s.EncPath)
+		}
+	}
+	if len(unstaged) > 0 {
+		fmt.Println("\nEncrypted but not staged (git enc add <file>):")
+		for _, p := range unstaged {
+			fmt.Println("  " + p)
 		}
 	}
 	if len(staged) > 0 {
@@ -321,12 +389,22 @@ func printStatus(e *engine.Engine) {
 		}
 	}
 	if a, _ := e.NeedsAttention(); !a {
-		n := len(r.Secrets)
-		if n == 1 {
-			fmt.Println("\n1 secret, clean")
-		} else {
-			fmt.Printf("\n%d secrets, all clean\n", n)
+		n, skipped := 0, 0
+		for _, s := range r.Secrets {
+			if s.Skipped {
+				skipped++
+			} else {
+				n++
+			}
 		}
+		line := fmt.Sprintf("%d secrets, all clean", n)
+		if n == 1 {
+			line = "1 secret, clean"
+		}
+		if skipped > 0 {
+			line += fmt.Sprintf(" (%d more for keys you skip)", skipped)
+		}
+		fmt.Println("\n" + line)
 	}
 	for _, w := range e.Keys.Warnings {
 		fmt.Fprintln(os.Stderr, "warning:", w)
@@ -340,23 +418,23 @@ func orUnknown(s string) string {
 	return s
 }
 
-func cmdCheck(args []string) (int, error) {
+func cmdCheck(args []string) (code int, err error) {
 	fs := flags("check")
 	if err := parse(fs, args); err != nil {
 		return exitUsage, err
 	}
-	e, err := open()
+	e, err := engine.OpenStatus(".")
 	if err != nil {
 		return exitError, err
 	}
-	defer e.Close()
-	code := attentionCode(e)
+	defer closeEngine(e, &code, &err)
+	code = attentionCode(e)
 	if code == exitOK {
 		return exitOK, nil
 	}
 	counts := map[engine.Kind]int{}
 	for _, s := range e.Secrets {
-		if s.Kind != engine.Clean {
+		if s.Kind != engine.Clean && !s.Skipped {
 			counts[s.Kind]++
 		}
 	}
@@ -367,13 +445,13 @@ func cmdCheck(args []string) (int, error) {
 		}
 	}
 	if len(e.Problems) > 0 {
-		parts = append(parts, fmt.Sprintf("%d problem(s) in .gitignore", len(e.Problems)))
+		parts = append(parts, fmt.Sprintf("%d problem(s)", len(e.Problems)))
 	}
 	fmt.Fprintf(os.Stderr, "git-enc: secrets need attention (%s) — run `git enc status`\n", strings.Join(parts, ", "))
 	return code, nil
 }
 
-func cmdAdd(args []string) (int, error) {
+func cmdAdd(args []string) (code int, err error) {
 	fs := flags("add")
 	all := fs.Bool("all", false, "")
 	fs.BoolVar(all, "A", false, "")
@@ -390,7 +468,7 @@ func cmdAdd(args []string) (int, error) {
 	if err != nil {
 		return exitError, err
 	}
-	defer e.Close()
+	defer closeEngine(e, &code, &err)
 	paths, err := relPaths(e, fs.Args())
 	if err != nil {
 		return exitUsage, err
@@ -403,7 +481,7 @@ func cmdAdd(args []string) (int, error) {
 	return exitOK, nil
 }
 
-func cmdUpdate(args []string) (int, error) {
+func cmdUpdate(args []string) (code int, err error) {
 	fs := flags("update")
 	discard := fs.Bool("discard", false, "")
 	if err := parse(fs, args); err != nil {
@@ -416,36 +494,55 @@ func cmdUpdate(args []string) (int, error) {
 	if err != nil {
 		return exitError, err
 	}
-	defer e.Close()
+	defer closeEngine(e, &code, &err)
 	paths, err := relPaths(e, fs.Args())
 	if err != nil {
 		return exitUsage, err
 	}
 	out, err := e.Update(paths, engine.UpdateOptions{Discard: *discard})
 	printLines(out)
+	for _, w := range e.Keys.Warnings {
+		fmt.Fprintln(os.Stderr, "warning:", w)
+	}
 	if err != nil {
 		return errorCode(err), err
 	}
-	if len(e.Reminders()) > 0 {
-		for _, s := range e.Secrets {
-			if s.Kind == engine.NoKey {
-				return exitNoKey, nil
-			}
+	// A script running `git enc update && ./app` must not go on with a
+	// secret still in conflict, or missing for want of a key.
+	code = exitOK
+	for _, s := range e.Secrets {
+		if len(paths) > 0 && !contains(paths, s.Path) {
+			continue
+		}
+		switch {
+		case s.Kind == engine.NoKey && !s.Skipped:
+			return exitNoKey, nil
+		case s.Kind == engine.Conflict, s.Kind == engine.Diverged, s.Kind == engine.Merging, s.Kind == engine.Corrupt:
+			code = exitAttention
 		}
 	}
-	return exitOK, nil
+	return code, nil
 }
 
-func cmdDiff(args []string) (int, error) {
+func contains(list []string, s string) bool {
+	for _, x := range list {
+		if x == s {
+			return true
+		}
+	}
+	return false
+}
+
+func cmdDiff(args []string) (code int, err error) {
 	fs := flags("diff")
 	if err := parse(fs, args); err != nil {
 		return exitUsage, err
 	}
-	e, err := open()
+	e, err := engine.OpenStatus(".")
 	if err != nil {
 		return exitError, err
 	}
-	defer e.Close()
+	defer closeEngine(e, &code, &err)
 	paths, err := relPaths(e, fs.Args())
 	if err != nil {
 		return exitUsage, err
@@ -453,7 +550,7 @@ func cmdDiff(args []string) (int, error) {
 	return exitOK, e.Diff(paths, isTTY(os.Stdout), os.Stdout)
 }
 
-func cmdMerge(args []string) (int, error) {
+func cmdMerge(args []string) (code int, err error) {
 	fs := flags("merge")
 	if err := parse(fs, args); err != nil {
 		return exitUsage, err
@@ -462,7 +559,7 @@ func cmdMerge(args []string) (int, error) {
 	if err != nil {
 		return exitError, err
 	}
-	defer e.Close()
+	defer closeEngine(e, &code, &err)
 	paths, err := relPaths(e, fs.Args())
 	if err != nil {
 		return exitUsage, err
@@ -475,7 +572,7 @@ func cmdMerge(args []string) (int, error) {
 	return exitOK, nil
 }
 
-func cmdInit(args []string) (int, error) {
+func cmdInit(args []string) (code int, err error) {
 	fs := flags("init")
 	if err := parse(fs, args); err != nil {
 		return exitUsage, err
@@ -484,7 +581,7 @@ func cmdInit(args []string) (int, error) {
 	if err != nil {
 		return exitError, err
 	}
-	defer e.Close()
+	defer closeEngine(e, &code, &err)
 	bin, err := binaryPath()
 	if err != nil {
 		return exitError, err
@@ -538,7 +635,8 @@ func cmdKey(args []string) (int, error) {
 			return exitError, err
 		}
 		fmt.Printf("created key %s (fingerprint %s) in %s\n", k.Name, k.Fingerprint, k.File)
-		fmt.Printf("share it once with your team, through a password manager:\n  git enc key show %s | pbcopy\n", k.Name)
+		fmt.Printf("That file is the only copy: without it nobody can decrypt these secrets.\n")
+		fmt.Printf("Save it in your password manager now, and share it the same way:\n  git enc key show %s | pbcopy\n", k.Name)
 	case "add":
 		if isTTY(os.Stdin) {
 			fmt.Fprintf(os.Stderr, "paste key %s, then press Ctrl-D:\n", name)
@@ -548,7 +646,7 @@ func cmdKey(args []string) (int, error) {
 			return exitError, err
 		}
 		fmt.Printf("saved key %s (fingerprint %s) in %s\n", k.Name, k.Fingerprint, k.File)
-		fmt.Println("next, in a repository that uses it: git enc update")
+		fmt.Println("next, in each repository that uses it: git enc init")
 	case "show":
 		st, err := keys.Load()
 		if err != nil {
@@ -590,20 +688,139 @@ func cmdKey(args []string) (int, error) {
 	return exitOK, nil
 }
 
-func cmdCat(args []string) (int, error) {
-	if len(args) != 1 {
-		return exitUsage, usageError{"usage: git enc cat FILE"}
+func cmdRekey(args []string) (code int, err error) {
+	fs := flags("rekey")
+	if err := parse(fs, args); err != nil {
+		return exitUsage, err
 	}
-	data, err := os.ReadFile(args[0])
+	if fs.NArg() < 2 {
+		return exitUsage, usageError{"usage: git enc rekey OLD NEW [FILE…]"}
+	}
+	e, err := open()
 	if err != nil {
 		return exitError, err
 	}
-	body, err := engine.Cat(data)
+	defer closeEngine(e, &code, &err)
+	paths, err := relPaths(e, fs.Args()[2:])
+	if err != nil {
+		return exitUsage, err
+	}
+	out, err := e.Rekey(fs.Arg(0), fs.Arg(1), paths)
+	printLines(out)
+	if err != nil {
+		return errorCode(err), err
+	}
+	return exitOK, nil
+}
+
+func cmdVerify(args []string) (int, error) {
+	fs := flags("verify")
+	if err := parse(fs, args); err != nil {
+		return exitUsage, err
+	}
+	if fs.NArg() > 1 {
+		return exitUsage, usageError{"usage: git enc verify [RANGE]"}
+	}
+	// Read-only: CI saves nothing, and needs no key.
+	e, err := engine.OpenReadOnly(".")
+	if err != nil {
+		return exitError, err
+	}
+	bad, err := e.Verify(fs.Arg(0))
+	if err != nil {
+		return exitError, err
+	}
+	for _, l := range bad {
+		fmt.Fprintln(os.Stderr, "git-enc verify:", l)
+	}
+	if len(bad) > 0 {
+		return exitAttention, nil
+	}
+	fmt.Printf("git-enc verify: %d secrets, all encrypted, no plaintext committed\n", len(e.Secrets))
+	return exitOK, nil
+}
+
+func cmdCat(args []string) (int, error) {
+	// --textconv: git's diff driver (`git enc init` sets it up), so that
+	// `git log -p` shows secrets in plain text. It never fails: a version
+	// this user cannot read shows as a note instead of breaking the diff.
+	textconv := len(args) == 2 && args[0] == "--textconv"
+	if textconv {
+		args = args[1:]
+	}
+	if len(args) != 1 {
+		return exitUsage, usageError{"usage: git enc cat FILE"}
+	}
+	var data []byte
+	var err error
+	if args[0] == "-" {
+		data, err = io.ReadAll(os.Stdin)
+	} else {
+		data, err = os.ReadFile(args[0])
+	}
+	if err == nil && !envelope.IsSealed(data) {
+		err = fmt.Errorf("%s is not an encrypted file", args[0])
+		if _, e2 := os.Stat(args[0] + ".enc"); e2 == nil {
+			err = fmt.Errorf("%s is not an encrypted file (did you mean %s.enc?)", args[0], args[0])
+		}
+	}
+	var body []byte
+	if err == nil {
+		body, err = engine.Cat(data)
+	}
+	if err != nil && textconv {
+		fmt.Printf("(git-enc: cannot show this version: %v)\n", err)
+		return exitOK, nil
+	}
 	if err != nil {
 		return exitError, err
 	}
 	os.Stdout.Write(body)
 	return exitOK, nil
+}
+
+// postHook runs after git changed the worktree. It never stops anything.
+// With automatic updates on (enc.autoUpdate, or under GitHub Desktop) it
+// takes the lock if it is free and brings secrets up to date; otherwise,
+// and for whatever needs you, it reminds.
+func postHook(name string) int {
+	e, err := engine.OpenStatus(".")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "git-enc:", err)
+		return exitOK
+	}
+	out, updated := e.AutoUpdate()
+	if updated {
+		out = append(out, e.Reminders()...)
+	} else {
+		out, _ = e.Hook(name)
+	}
+	for _, l := range out {
+		fmt.Fprintln(os.Stderr, l)
+	}
+	if err := e.Close(); err != nil {
+		fmt.Fprintln(os.Stderr, "git-enc:", err)
+	}
+	return exitOK
+}
+
+// cmdMergeDriver is git's merge driver for .enc files (`git enc init` sets
+// it up): exit 0 with the merged file written over ours, or 1 for a
+// conflict, which `git enc merge` then resolves in the plaintext.
+func cmdMergeDriver(args []string) int {
+	if len(args) != 4 {
+		fmt.Fprintln(os.Stderr, "usage: git enc merge-driver BASE OURS THEIRS PATH")
+		return exitUsage
+	}
+	ok, err := engine.MergeDriver(".", args[0], args[1], args[2], args[3])
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "git-enc:", err)
+	}
+	if !ok || err != nil {
+		fmt.Fprintf(os.Stderr, "git-enc: could not merge %s; resolve it with `git enc merge %s`\n", args[3], strings.TrimSuffix(args[3], ".enc"))
+		return exitError
+	}
+	return exitOK
 }
 
 // cmdHook runs a git hook. Hooks read without taking git-enc's lock, so
@@ -612,6 +829,13 @@ func cmdCat(args []string) (int, error) {
 func cmdHook(args []string) int {
 	if len(args) == 0 {
 		return exitOK
+	}
+	if args[0] == "post-checkout" && len(args) == 4 && args[3] == "1" && engine.SameSecrets(".", args[1], args[2]) {
+		return exitOK // a branch switch that changed no .enc and no .gitignore: nothing to remind
+	}
+	switch args[0] {
+	case "post-checkout", "post-merge", "post-rewrite":
+		return postHook(args[0])
 	}
 	e, err := engine.OpenReadOnly(".")
 	if err != nil {
@@ -623,6 +847,19 @@ func cmdHook(args []string) int {
 		return exitOK
 	}
 	out, stop := e.Hook(args[0])
+	if args[0] == "pre-push" {
+		// Fails closed: a push that cannot be checked could carry plaintext.
+		refs, _ := io.ReadAll(io.LimitReader(os.Stdin, 1<<20))
+		bad, err := e.OutgoingPlaintext(string(refs))
+		if err != nil {
+			out = append(out, "git-enc: cannot check this push for plaintext secrets: "+err.Error())
+			stop = true
+		}
+		for _, p := range bad {
+			out = append(out, fmt.Sprintf("git-enc: refusing to push: a commit being pushed contains the plaintext secret %s\n  it has not left this machine yet, so the secret itself is safe: remove it from those commits\n  (find them with: git log --oneline --not --remotes -- %s), then push again", p, p))
+			stop = true
+		}
+	}
 	for _, l := range out {
 		fmt.Fprintln(os.Stderr, l)
 	}

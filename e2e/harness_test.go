@@ -107,6 +107,7 @@ type Person struct {
 	Name string
 	Dir  string
 	home string
+	Env  []string // extra environment for every command
 }
 
 // clone makes a new person with a clone of origin.
@@ -134,9 +135,13 @@ type Result struct {
 }
 
 func (p *Person) exec(stdin string, name string, args ...string) Result {
+	return p.execIn(p.Dir, stdin, name, args...)
+}
+
+func (p *Person) execIn(dir, stdin string, name string, args ...string) Result {
 	cmd := exec.Command(name, args...)
-	cmd.Dir = p.Dir
-	cmd.Env = p.w.env(p.home)
+	cmd.Dir = dir
+	cmd.Env = append(p.w.env(p.home), p.Env...)
 	if stdin != "" {
 		cmd.Stdin = strings.NewReader(stdin)
 	}
@@ -178,6 +183,16 @@ func (p *Person) Enc(args ...string) string {
 // TryEnc runs git enc and returns the result.
 func (p *Person) TryEnc(args ...string) Result {
 	return p.exec("", "git", append([]string{"enc"}, args...)...)
+}
+
+// EncAt runs git enc in a subdirectory of the worktree.
+func (p *Person) EncAt(sub string, args ...string) Result {
+	return p.execIn(filepath.Join(p.Dir, filepath.FromSlash(sub)), "", "git", append([]string{"enc"}, args...)...)
+}
+
+// Binary runs the git-enc binary itself, not through git.
+func (p *Person) Binary(args ...string) Result {
+	return p.exec("", filepath.Join(binDir, "git-enc"), args...)
 }
 
 // EncIn runs git enc with stdin.
