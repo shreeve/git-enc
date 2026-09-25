@@ -33,6 +33,13 @@ const (
 	minSize = 256
 )
 
+// ageHeader starts every binary age file.
+const ageHeader = "age-encryption.org/v1\n"
+
+// IsSealed reports whether data looks like a .enc file (an age file), as
+// opposed to plaintext that ended up under a .enc name.
+func IsSealed(data []byte) bool { return bytes.HasPrefix(data, []byte(ageHeader)) }
+
 // ErrPath means the ciphertext belongs to a different path.
 var ErrPath = errors.New("encrypted for a different path")
 

@@ -50,7 +50,8 @@ On Windows, download `git-enc.exe` from the
 it on your PATH. With Go installed, `go install
 github.com/shreeve/git-enc/cmd/git-enc@latest` works anywhere.
 
-git-enc is one self-contained binary; git runs it as `git enc`. Release
+git-enc is one self-contained binary; git runs it as `git enc`. It needs
+git 2.31 or later. Release
 archives come with sha256 checksums and GitHub build attestations
 (`gh attestation verify FILE --repo shreeve/git-enc`).
 
@@ -92,6 +93,7 @@ git enc init                    # hooks, and decrypts every secret you have a ke
 | `git enc diff [FILE…]` | Your edits against the committed version |
 | `git enc merge [FILE…]` | Resolve a git merge or rebase conflict on a secret |
 | `git enc check` | Quiet, for scripts: exit 3 if anything needs doing |
+| `git enc rekey OLD NEW` | Move to a new key and re-encrypt (see [Changing keys](#changing-keys)) |
 
 Exit codes: 0 success, 1 error, 2 usage, 3 needs attention (a secret must be
 added, updated or merged first), 4 a key is missing.
@@ -111,6 +113,9 @@ Put `git enc check` in the script that starts your app (`bin/dev`, a
 | `diverged` | It matches no committed version and git-enc has no record to tell why | `git enc update` |
 | `merging` | Git has a merge or rebase conflict on the `.enc` | `git enc merge` |
 | `no-key` | You don't have the key (or have a different key with that name) | `git enc key add` |
+| `no-key` (…`git enc rekey`) | Its block now uses another key, and you have the old one | `git enc rekey` |
+| `orphaned` | No block lists it any more, but the plaintext or `.enc` is still here | `git enc add` to declare it again, or delete it |
+| `corrupt` | The `.enc` can't be read, or was encrypted for a different path | restore it from git, or ask who wrote it |
 
 ### It never loses your work
 
@@ -142,7 +147,8 @@ tell, it says so (`diverged`) instead of guessing.
 `git enc init` installs hooks that **never encrypt or decrypt anything**:
 
 - **pre-commit** refuses to commit a secret's plaintext (for example after
-  `git add -f .env`), and reminds you of edits you haven't added. Set
+  `git add -f .env`, or a plaintext copied over `.env.enc`), and reminds
+  you of edits you haven't added. Set
   `git config enc.requireAdded true` to make that reminder block the commit.
 - **pre-push** gives the same reminder.
 - **post-checkout, post-merge, post-rewrite** remind you when secrets
@@ -176,7 +182,8 @@ Inside a block, every line is an ordinary `.gitignore` pattern:
 
 ```gitignore
 # git-enc: team 3f9a1c2e
-# .env in any directory, one exact path, and every .pem in certs/
+# .env in any directory (except ones git already ignores, like
+# node_modules/), one exact path, and every .pem in certs/
 .env
 /config/secrets.yml
 /certs/*.pem
@@ -205,7 +212,8 @@ own lines.
   ciphertext.
 
 Several blocks may use different keys (`# git-enc: ops`) for different
-groups of people.
+groups of people. To move a secret to another block, move its line there
+and run `git enc rekey`.
 
 If an existing rule would also hide encrypted files (a common one is
 `.env*`, which matches `.env.enc`), add `!*.enc` after it. Git applies the
@@ -232,6 +240,22 @@ your shell history.
 
 For CI, put one or more keys in `GIT_ENC_KEY` and run `git enc update`.
 
+### Changing keys
+
+When someone leaves, or a key may have leaked:
+
+```sh
+git enc key new team2            # the new key
+git enc rekey team team2         # every "team" block now uses team2; re-encrypts and stages
+git commit -m "Move secrets to key team2"
+```
+
+Share `team2` with the people who stay. Until they import it
+(`git enc key add team2`), their secrets show as `no-key`. `rekey`
+re-encrypts what is committed, not your working copy, so edits you haven't
+added stay edits. Then **change the secrets themselves**: anyone with the
+old key can still read every old version in git history.
+
 ## Security
 
 A `.enc` file is a standard age file (`age -d -i ~/.config/git-enc/keys/team
@@ -254,7 +278,7 @@ fork, a CI cache, GitHub itself.
 **It does not protect:**
 
 - **History from anyone who ever had the key.** Git keeps every version
-  forever. When someone leaves, create a new key, re-encrypt, **and change
+  forever. When someone leaves, [change keys](#changing-keys) **and change
   the secrets themselves**.
 - **Metadata**: file names, roughly how big each secret is, when it
   changed, who changed it, commit messages.

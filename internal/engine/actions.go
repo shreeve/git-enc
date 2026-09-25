@@ -56,7 +56,7 @@ func (e *Engine) Add(paths []string, opt AddOptions) ([]string, error) {
 		if s == nil {
 			return out, fmt.Errorf("%s: not a secret (is it listed in a git-enc block?)", p)
 		}
-		targets = append(targets, s)
+		targets = appendNew(targets, s)
 	}
 	if len(targets) == 0 {
 		out = append(out, "nothing to add")
@@ -157,7 +157,7 @@ func (e *Engine) addOne(s *Secret, force, explicit bool) ([]string, error) {
 	if err := fsx.WriteWorktree(e.Repo.Root, s.EncPath, sealed, 0o644); err != nil {
 		return nil, err
 	}
-	blob, _ := e.Repo.HashBytes(sealed)
+	blob := e.Repo.BlobID(sealed)
 	e.Cache.Put(blob, s.PlainHash)
 	if _, err := e.Repo.Git("add", "--", ":(literal)"+s.EncPath); err != nil {
 		return nil, err
@@ -182,7 +182,11 @@ func (e *Engine) checkIgnored(s *Secret) error {
 	if _, err := e.Repo.Git("check-ignore", "-q", "--no-index", "--", s.EncPath); err == nil {
 		out, _ := e.Repo.Git("check-ignore", "-v", "--no-index", "--", s.EncPath)
 		src := strings.SplitN(strings.TrimSpace(string(out)), "\t", 2)[0]
-		return refuse("%s would be ignored by git (%s); add a line `!*.enc` after that rule, or narrow it", s.EncPath, src)
+		hint := ""
+		if strings.HasSuffix(src, "/") {
+			hint = " (a rule for a whole directory cannot be undone that way: write `dir/*` instead of `dir/`)"
+		}
+		return refuse("%s would be ignored by git (%s); add a line `!*.enc` after that rule, or narrow it%s", s.EncPath, src, hint)
 	}
 	return nil
 }
@@ -194,9 +198,12 @@ func (e *Engine) declare(paths []string, keyName string, out *[]string) (bool, e
 		if err := spec.CheckPath(p); err != nil {
 			return false, err
 		}
-		if b, _, err := e.Spec.Match(p); err != nil {
+		if b, pat, err := e.Spec.Match(p); err != nil {
 			return false, err
 		} else if b != nil {
+			if keyName != "" && b.Key != keyName {
+				return false, fmt.Errorf("%s is already declared for key %s (.gitignore line %d); to change its key, move that line into a `# git-enc: %s` block, then run `git enc rekey`", p, b.Key, pat.Line, keyName)
+			}
 			continue
 		}
 		if e.Secret(p) != nil && e.Secret(p).Kind != Orphaned {
@@ -315,7 +322,7 @@ func (e *Engine) Update(paths []string, opt UpdateOptions) ([]string, error) {
 		if s == nil {
 			return nil, fmt.Errorf("%s: not a secret", p)
 		}
-		targets = append(targets, s)
+		targets = appendNew(targets, s)
 	}
 	var out []string
 	if len(targets) == 0 {
@@ -446,10 +453,28 @@ func (e *Engine) backup(s *Secret) (string, error) {
 	if err := fsx.WriteAtomic(file, sealed, 0o600); err != nil {
 		return "", err
 	}
-	if rel, err := filepath.Rel(e.Repo.Root, file); err == nil && !strings.HasPrefix(rel, "..") {
-		return filepath.ToSlash(rel), nil
+	return e.display(file), nil
+}
+
+// display renders a file under the worktree relative to the current
+// directory, so a command printed with it works where it was run; other
+// files keep their absolute path.
+func (e *Engine) display(abs string) string {
+	if rel, err := filepath.Rel(e.Repo.Root, abs); err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return abs
 	}
-	return file, nil
+	cwd, err := os.Getwd()
+	if err != nil {
+		return abs
+	}
+	if real, err := filepath.EvalSymlinks(cwd); err == nil {
+		cwd = real
+	}
+	rel, err := filepath.Rel(cwd, abs)
+	if err != nil {
+		return abs
+	}
+	return filepath.ToSlash(rel)
 }
 
 // merge3 merges the committed version into the local edits against their
@@ -466,7 +491,7 @@ func (e *Engine) merge3(s *Secret, theirs []byte) ([]byte, bool, error) {
 	if !ok {
 		return nil, false, nil
 	}
-	base, err := e.open(s, data)
+	base, err := e.openAny(s, data)
 	if err != nil {
 		return nil, false, nil
 	}
@@ -480,11 +505,11 @@ func (e *Engine) merge3(s *Secret, theirs []byte) ([]byte, bool, error) {
 // mergeFile runs `git merge-file` on three versions and returns the result
 // and the number of conflicts.
 func (e *Engine) mergeFile(ours, base, theirs []byte, lo, lb, lt string) ([]byte, int, error) {
-	dir, err := os.MkdirTemp(e.baseDir, "merge-")
+	dir, done, err := fsx.TempDir(e.baseDir, "merge-")
 	if err != nil {
 		return nil, 0, err
 	}
-	defer os.RemoveAll(dir)
+	defer done()
 	files := []string{filepath.Join(dir, "ours"), filepath.Join(dir, "base"), filepath.Join(dir, "theirs")}
 	for i, b := range [][]byte{ours, base, theirs} {
 		if err := os.WriteFile(files[i], b, 0o600); err != nil {
@@ -549,7 +574,7 @@ func (e *Engine) Merge(paths []string) ([]string, error) {
 		}
 		side := map[int][]byte{}
 		for st, b := range s.Unmerged {
-			body, err := e.open(s, blobs[b])
+			body, err := e.openAny(s, blobs[b])
 			if err != nil {
 				return out, fmt.Errorf("%s: cannot decrypt stage %d: %v", s.Path, st, err)
 			}
@@ -601,6 +626,16 @@ func anyEqual(b []byte, sides map[int][]byte) bool {
 	return false
 }
 
+// appendNew appends s to list unless it is already there.
+func appendNew(list []*Secret, s *Secret) []*Secret {
+	for _, t := range list {
+		if t == s {
+			return list
+		}
+	}
+	return append(list, s)
+}
+
 func contains(list []string, s string) bool {
 	for _, x := range list {
 		if x == s {
@@ -628,11 +663,11 @@ func (e *Engine) Diff(paths []string, color bool, w io.Writer) error {
 			return fmt.Errorf("%s: not a secret", p)
 		}
 	}
-	dir, err := os.MkdirTemp(e.baseDir, "diff-")
+	dir, done, err := fsx.TempDir(e.baseDir, "diff-")
 	if err != nil {
 		return err
 	}
-	defer os.RemoveAll(dir)
+	defer done()
 	for _, s := range targets {
 		var committed []byte
 		if s.EncBlob != "" {
@@ -681,7 +716,7 @@ func Cat(data []byte) ([]byte, error) {
 	return body, err
 }
 
-// ExitMessage is used by callers that want a count in text.
+// plural renders a count and a noun: "1 secret", "2 secrets".
 func plural(n int, one string) string {
 	if n == 1 {
 		return "1 " + one
