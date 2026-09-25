@@ -447,6 +447,33 @@ func (r *Repo) history1(paths []string) (map[string]map[string]bool, error) {
 	return res, nil
 }
 
+// Versions returns the blob ids path has had along HEAD's first-parent
+// history, newest first, one per commit that changed it.
+func (r *Repo) Versions(path string) ([]string, error) {
+	if !r.HasHead() {
+		return nil, nil
+	}
+	out, err := r.Git("log", "--first-parent", "--diff-merges=first-parent", "--format=", "--raw", "-z",
+		"--no-abbrev", "--no-renames", "HEAD", "--", ":(literal)"+path)
+	if err != nil {
+		return nil, err
+	}
+	var ids []string
+	fields := SplitZ(out)
+	for i := 0; i+1 < len(fields); i++ {
+		// -z raw records: ":mode mode old new status\0path\0"
+		rec := strings.TrimLeft(fields[i], "\n")
+		if !strings.HasPrefix(rec, ":") {
+			continue
+		}
+		i++ // the path
+		if f := strings.Fields(rec); len(f) >= 5 && strings.Trim(f[3], "0") != "" {
+			ids = append(ids, f[3])
+		}
+	}
+	return ids, nil
+}
+
 // Exists reports whether anything (a file, directory or symlink) is at abs.
 func Exists(abs string) bool {
 	_, err := os.Lstat(abs)

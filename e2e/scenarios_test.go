@@ -1508,3 +1508,76 @@ func TestSkipKeys(t *testing.T) {
 	shareKey(t, a, b, "ops")
 	b.expectState("prod.env", "missing")
 }
+
+// `git enc verify` is what CI runs, with no key and whatever hooks were
+// skipped: the server's half of the guards.
+func TestVerify(t *testing.T) {
+	w, a, _ := team(t)
+	if out := a.Enc("verify"); !strings.Contains(out, "all encrypted") {
+		t.Fatalf("verify:\n%s", out)
+	}
+	ci := w.clone("ci") // no key, no init
+	if r := ci.TryEnc("verify"); r.Code != 0 {
+		t.Fatalf("keyless verify of a sound repository: exit %d\n%s", r.Code, r.Err)
+	}
+
+	// Plaintext committed past the hooks, then deleted again.
+	a.Git("add", "-f", ".env")
+	a.Git("commit", "-q", "--no-verify", "-m", "oops")
+	if r := a.TryEnc("verify"); r.Code != 3 || !strings.Contains(r.Err, ".env") {
+		t.Fatalf("verify with plaintext committed: exit %d\n%s", r.Code, r.Err)
+	}
+	a.Git("rm", "-q", "--cached", ".env")
+	a.Git("commit", "-q", "-m", "remove it again")
+	if r := a.TryEnc("verify"); r.Code != 0 {
+		t.Fatalf("verify of the tree: exit %d\n%s", r.Code, r.Err)
+	}
+	if r := a.TryEnc("verify", "origin/main..HEAD"); r.Code != 3 || !strings.Contains(r.Err, "in a commit of origin/main..HEAD") {
+		t.Fatalf("verify of the commits: exit %d\n%s", r.Code, r.Err)
+	}
+	a.Git("reset", "-q", "--hard", "origin/main")
+
+	// A copy git-enc keeps beside a secret, which no status problem names.
+	a.Write(".env.incoming", "API_KEY=theirs\n")
+	a.Git("add", "-f", ".env.incoming")
+	a.Git("commit", "-q", "--no-verify", "-m", "oops")
+	if r := a.TryEnc("verify"); r.Code != 3 || !strings.Contains(r.Err, ".env.incoming: a secret's plaintext is committed") {
+		t.Fatalf("verify with .incoming committed: exit %d\n%s", r.Code, r.Err)
+	}
+	a.Git("reset", "-q", "--hard", "origin/main")
+
+	// A plaintext copied over the .enc.
+	a.Write(".env.enc", "API_KEY=leaked\n")
+	a.Git("add", ".env.enc")
+	a.Git("commit", "-q", "--no-verify", "-m", "oops")
+	if r := a.TryEnc("verify"); r.Code != 3 || !strings.Contains(r.Err, ".env.enc: not an encrypted file") {
+		t.Fatalf("verify with an unencrypted .enc: exit %d\n%s", r.Code, r.Err)
+	}
+
+	// A `!` rule that un-ignores a declared secret, seen without the key.
+	ci.Write(".gitignore", ci.Read(".gitignore")+"!/.env\n")
+	if r := ci.TryEnc("verify"); r.Code != 3 || !strings.Contains(r.Err, "git does not ignore this secret") {
+		t.Fatalf("verify with a `!` rule: exit %d\n%s", r.Code, r.Err)
+	}
+}
+
+// Someone who can push but has no key can still commit an old .enc over a
+// new one: update says so before applying it.
+func TestRollbackWarned(t *testing.T) {
+	w, a, b := team(t)
+	a.Write(".env", "API_KEY=two\n")
+	a.Enc("add", ".env")
+	a.commitPush("rotated: one leaked")
+	b.Git("pull", "-q")
+	if out := b.Enc("update"); strings.Contains(out, "back to a value") {
+		t.Fatalf("an ordinary update warned:\n%s", out)
+	}
+	m := w.clone("mallory") // no key
+	m.Git("checkout", "HEAD~1", "--", ".env.enc")
+	m.Git("commit", "-q", "-m", "innocent-looking change")
+	m.Git("push", "-q", "origin", "HEAD")
+	b.Git("pull", "-q")
+	if out := b.Enc("update"); !strings.Contains(out, "back to a value it had before") {
+		t.Fatalf("rollback not warned:\n%s", out)
+	}
+}

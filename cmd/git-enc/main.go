@@ -82,6 +82,9 @@ Setup:
 
 Other:
     git enc check              quiet check for scripts: exit 3 if anything needs doing
+    git enc verify [RANGE]     for CI, no key needed: no plaintext committed (in
+                               RANGE's commits too, e.g. origin/main..HEAD), every
+                               .enc encrypted, .gitignore sound; exit 3 if not
     git enc cat FILE           decrypt a .enc or a backup to stdout (- for stdin)
     git enc version [--json]
 
@@ -131,6 +134,8 @@ func run(args []string) int {
 		code, err = cmdKey(rest)
 	case "cat":
 		code, err = cmdCat(rest)
+	case "verify":
+		code, err = cmdVerify(rest)
 	case "rekey":
 		code, err = cmdRekey(rest)
 	case "hook":
@@ -705,6 +710,33 @@ func cmdRekey(args []string) (code int, err error) {
 	if err != nil {
 		return errorCode(err), err
 	}
+	return exitOK, nil
+}
+
+func cmdVerify(args []string) (int, error) {
+	fs := flags("verify")
+	if err := parse(fs, args); err != nil {
+		return exitUsage, err
+	}
+	if fs.NArg() > 1 {
+		return exitUsage, usageError{"usage: git enc verify [RANGE]"}
+	}
+	// Read-only: CI saves nothing, and needs no key.
+	e, err := engine.OpenReadOnly(".")
+	if err != nil {
+		return exitError, err
+	}
+	bad, err := e.Verify(fs.Arg(0))
+	if err != nil {
+		return exitError, err
+	}
+	for _, l := range bad {
+		fmt.Fprintln(os.Stderr, "git-enc verify:", l)
+	}
+	if len(bad) > 0 {
+		return exitAttention, nil
+	}
+	fmt.Printf("git-enc verify: %d secrets, all encrypted, no plaintext committed\n", len(e.Secrets))
 	return exitOK, nil
 }
 
