@@ -122,6 +122,8 @@ muts = [
   "if !force && s.Incoming != \"\" && s.PlainHash == s.entry.Kept {", "if false {", "TestLostState"),
  ("update exits 0 with a conflict left", "cmd/git-enc/main.go",
   "\t\t\tcode = exitAttention", "\t\t\tcode = exitOK", "TestConflictIncoming"),
+ ("skipped keys still need attention", "internal/engine/report.go",
+  "if s.Kind == Clean || s.Skipped {", "if s.Kind == Clean {", "TestSkipKeys"),
 ]
 stale = [name for name, f, old, _, _ in muts if old not in open(f).read()]
 if stale:

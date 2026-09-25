@@ -24,15 +24,13 @@ import (
 const DriverLine = "*.enc merge=git-enc"
 
 // installDriver defines the merge driver in the clone's config and turns
-// it on in .git/info/attributes. It also sets the diff driver
-// .gitattributes names (diff=git-enc), so `git log -p` and `git diff` show
-// secrets decrypted in this clone. Its output is never cached: git would
-// keep the plaintext in a ref.
+// it on in .git/info/attributes. (It leaves the diff driver .gitattributes
+// names, diff=git-enc, unset: showing secrets in every `git diff` and
+// `git log -p` is for the user to turn on, and the README says how.)
 func (e *Engine) installDriver(binary string) error {
 	for _, kv := range [][2]string{
 		{"merge.git-enc.name", "git-enc: merge decrypted secrets"},
 		{"merge.git-enc.driver", shellQuote(binary) + " merge-driver %O %A %B %P"},
-		{"diff.git-enc.textconv", shellQuote(binary) + " cat --textconv"},
 	} {
 		if _, err := e.Repo.Git("config", "--local", kv[0], kv[1]); err != nil {
 			return err

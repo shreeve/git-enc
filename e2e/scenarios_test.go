@@ -1443,7 +1443,12 @@ func TestMessages(t *testing.T) {
 		t.Fatalf("status after init:\n%s", out)
 	}
 
-	// `git log -p` shows what a secret was.
+	// Secrets on screen in every diff are opt-in; then `git log -p` shows
+	// what a secret was.
+	if r := b.TryGit("config", "diff.git-enc.textconv"); r.Code == 0 {
+		t.Fatalf("init turned on decrypted diffs: %s", r.Out)
+	}
+	b.Git("config", "diff.git-enc.textconv", "git-enc cat --textconv")
 	b.Write(".env", "API_KEY=two\n")
 	b.Enc("add", ".env")
 	b.Git("commit", "-q", "-m", "two")
@@ -1461,4 +1466,45 @@ func TestMessages(t *testing.T) {
 	if r := a.TryEnc("cat", ".env"); r.Code == 0 || !strings.Contains(r.Err, "did you mean .env.enc") {
 		t.Fatalf("cat of a plaintext: exit %d\n%s", r.Code, r.Err)
 	}
+}
+
+// Someone outside a group (or a CI job) says so once, with enc.skipKeys,
+// and that group's secrets stop asking for a key they will never have.
+func TestSkipKeys(t *testing.T) {
+	w := newWorld(t)
+	a := w.clone("alice")
+	a.Enc("key", "new", "team")
+	a.Enc("key", "new", "ops")
+	a.Enc("init")
+	a.Write(".env", "APP=1\n")
+	a.Enc("add", "--key", "team", ".env")
+	a.Write("prod.env", "ROOT=1\n")
+	a.Enc("add", "--key", "ops", "prod.env")
+	a.commitPush("two groups")
+
+	b := w.clone("bob")
+	shareKey(t, a, b, "team")
+	b.Enc("init")
+	if r := b.TryEnc("check"); r.Code != 4 {
+		t.Fatalf("check before skipping: exit %d", r.Code)
+	}
+	b.Git("config", "enc.skipKeys", "ops")
+	if r := b.TryEnc("check"); r.Code != 0 {
+		t.Fatalf("check: exit %d\n%s", r.Code, r.Err)
+	}
+	if r := b.TryEnc("update"); r.Code != 0 || strings.Contains(r.Out, "prod.env") {
+		t.Fatalf("update: exit %d\n%s", r.Code, r.Out)
+	}
+	if out := b.Enc("status"); !strings.Contains(out, "not yours") || !strings.Contains(out, "1 secret, clean (1 more") {
+		t.Fatalf("status:\n%s", out)
+	}
+	a.Write("prod.env", "ROOT=2\n")
+	a.Enc("add", "prod.env")
+	a.commitPush("ops change")
+	if out := b.Git("pull"); strings.Contains(out, "git-enc") {
+		t.Fatalf("reminded about a skipped key:\n%q", out)
+	}
+	// Importing the key later makes them ordinary secrets again.
+	shareKey(t, a, b, "ops")
+	b.expectState("prod.env", "missing")
 }

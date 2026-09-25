@@ -87,7 +87,7 @@ type Repo struct {
 	hasHead   bool   // HEAD points at a commit (git-enc never moves HEAD)
 
 	gitPaths map[string]string          // --git-path answers asked for at Open
-	bools    map[string]string          // boolConfig values, once read
+	config   map[string]*string         // knownConfig values, once read
 	history  map[string]map[string]bool // History answers so far
 }
 
@@ -207,60 +207,75 @@ func (r *Repo) Config(key string) string {
 	return strings.TrimRight(string(out), "\n")
 }
 
-// boolConfig are the boolean settings git-enc reads, fetched together the
-// first time any of them is asked for.
-var boolConfig = []string{"core.ignorecase", "enc.requireadded"}
+// knownConfig are the settings git-enc reads, fetched together, as
+// written, the first time any of them is asked for.
+var knownConfig = []string{"core.ignorecase", "enc.requireadded", "enc.skipkeys"}
 
 // ConfigBool reads a boolean config value with a default.
 func (r *Repo) ConfigBool(key string, def bool) bool {
-	lk := strings.ToLower(key) // no subsections: the whole name is case-insensitive
-	for _, k := range boolConfig {
-		if k == lk {
-			return r.cachedBool(lk, def)
+	if v, known := r.known(key); known {
+		if v == nil {
+			return def
 		}
+		if b, ok := parseBool(*v); ok {
+			return b
+		}
+		return def
 	}
-	return r.configBool(key, def)
-}
-
-func (r *Repo) configBool(key string, def bool) bool {
 	out, err := r.Git("config", "--type=bool", "--get", key)
 	if err != nil {
 		return def
 	}
-	v, err := strconv.ParseBool(strings.TrimSpace(string(out)))
-	if err != nil {
-		return def
-	}
-	return v
+	return strings.TrimSpace(string(out)) == "true"
 }
 
-// cachedBool reads every boolConfig key with one `git config`, which
-// normalizes each value (yes, on, 1…) to true or false. If any value is
-// malformed that call fails, and each key is read on its own, so one bad
-// setting cannot change another's.
-func (r *Repo) cachedBool(key string, def bool) bool {
-	if r.bools == nil {
-		r.bools = map[string]string{}
-		re := "^(" + strings.ReplaceAll(strings.Join(boolConfig, "|"), ".", `\.`) + ")$"
-		out, err := r.Git("config", "-z", "--type=bool", "--get-regexp", re)
-		var ge *Error
-		switch {
-		case err == nil:
-			for _, rec := range SplitZ(out) {
-				k, v, _ := strings.Cut(rec, "\n")
-				r.bools[k] = v // the last value wins, as in git
+// ConfigString reads one of the known settings as written, or "".
+func (r *Repo) ConfigString(key string) string {
+	if v, _ := r.known(key); v != nil {
+		return *v
+	}
+	return ""
+}
+
+// known returns a known setting's last value (nil if unset), reading all
+// of them with one `git config` the first time.
+func (r *Repo) known(key string) (*string, bool) {
+	lk := strings.ToLower(key) // no subsections: the whole name is case-insensitive
+	found := false
+	for _, k := range knownConfig {
+		found = found || k == lk
+	}
+	if !found {
+		return nil, false
+	}
+	if r.config == nil {
+		r.config = map[string]*string{}
+		re := "^(" + strings.ReplaceAll(strings.Join(knownConfig, "|"), ".", `\.`) + ")$"
+		out, _ := r.Git("config", "-z", "--get-regexp", re) // exit 1: none set
+		for _, rec := range SplitZ(out) {
+			k, v, hasValue := strings.Cut(rec, "\n")
+			if !hasValue {
+				v = "true" // `[enc] requireAdded` alone means true, as in git
 			}
-		case errors.As(err, &ge) && ge.ExitCode() == 1: // none set
-		default:
-			r.bools = nil
-			return r.configBool(key, def)
+			r.config[k] = &v // the last value wins, as in git
 		}
 	}
-	v, ok := r.bools[key]
-	if !ok {
-		return def
+	return r.config[lk], true
+}
+
+// parseBool reads a boolean the way git does: true, yes, on or a nonzero
+// number; false, no, off, 0 or empty.
+func parseBool(v string) (bool, bool) {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "true", "yes", "on":
+		return true, true
+	case "false", "no", "off", "":
+		return false, true
 	}
-	return v == "true"
+	if n, err := strconv.ParseInt(strings.TrimSpace(v), 0, 64); err == nil {
+		return n != 0, true
+	}
+	return false, false
 }
 
 // SplitZ splits NUL-terminated output.

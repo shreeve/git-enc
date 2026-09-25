@@ -23,6 +23,7 @@ type ReportKey struct {
 	Name        string `json:"name"`
 	Fingerprint string `json:"fingerprint"`
 	Available   bool   `json:"available"`
+	Skipped     bool   `json:"skipped,omitempty"` // not available, on purpose (enc.skipKeys)
 	Line        int    `json:"gitignore_line"`
 }
 
@@ -38,6 +39,7 @@ type ReportSecret struct {
 	KeyAvailable bool   `json:"key_available"`
 	Line         int    `json:"gitignore_line"`
 	Incoming     string `json:"incoming,omitempty"`
+	Skipped      bool   `json:"skipped,omitempty"` // no-key on purpose (enc.skipKeys)
 	Message      string `json:"message,omitempty"`
 	Action       string `json:"action,omitempty"`
 }
@@ -54,18 +56,19 @@ func (e *Engine) Report() *Report {
 	if r.Problems == nil {
 		r.Problems = []Problem{}
 	}
+	skip := e.SkippedKeys()
 	for _, b := range e.Spec.Blocks {
 		k := e.blockKey(b)
 		fp := b.Fingerprint
 		if fp == "" && k != nil {
 			fp = k.Fingerprint
 		}
-		r.Keys = append(r.Keys, ReportKey{Name: b.Key, Fingerprint: fp, Available: k != nil, Line: b.Start})
+		r.Keys = append(r.Keys, ReportKey{Name: b.Key, Fingerprint: fp, Available: k != nil, Skipped: k == nil && skip[b.Key], Line: b.Start})
 	}
 	for _, s := range e.Secrets {
 		rs := ReportSecret{
 			Path: s.Path, EncPath: s.EncPath, State: s.Kind, Staged: s.Staged, EncDirty: s.EncDirty,
-			KeyAvailable: s.Key != nil, Incoming: s.Incoming, Message: s.Message, Action: s.Action,
+			KeyAvailable: s.Key != nil, Incoming: s.Incoming, Skipped: s.Skipped, Message: s.Message, Action: s.Action,
 		}
 		if s.Block != nil {
 			rs.Key, rs.Fingerprint, rs.Line = s.Block.Key, s.Block.Fingerprint, s.Block.Start
@@ -83,7 +86,7 @@ func (e *Engine) Report() *Report {
 func (e *Engine) NeedsAttention() (attention, onlyKeys bool) {
 	keysOnly := true
 	for _, s := range e.Secrets {
-		if s.Kind == Clean {
+		if s.Kind == Clean || s.Skipped {
 			continue
 		}
 		attention = true

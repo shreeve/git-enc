@@ -109,14 +109,15 @@ Put `git enc check` in the script that starts your app (`bin/dev`, a
 |---|---|---|
 | `clean` | Your copy matches the committed version | — |
 | `modified` / `new` | You edited it (or it isn't encrypted yet) | `git enc add` |
-| `outdated` / `missing` | Someone committed a newer version (or your `.enc` was deleted) | `git enc update` |
+| `outdated` | Someone committed a newer version | `git enc update` |
+| `missing` | You have no plaintext yet, or its `.enc` was deleted | `git enc update` (restores whichever is gone) |
 | `conflict` | You edited it *and* it changed in git | `git enc update` |
 | `diverged` | It matches no committed version and git-enc has no record to tell why | `git enc update` |
 | `merging` | Git has a merge or rebase conflict on the `.enc` | `git enc merge` |
 | `no-key` | You don't have the key (or have a different key with that name) | `git enc key add` |
 | `no-key` (…`git enc rekey`) | Its `.enc` opens with another of your keys than its block names | `git enc rekey OLD NEW FILE` if you moved it; otherwise check `git log -p .gitignore` |
 | `orphaned` | No block lists it any more, but the plaintext or `.enc` is still here | `git enc add` to declare it again, or delete it |
-| `corrupt` | The `.enc` or the plaintext can't be read, or the `.enc` was encrypted for a different path | restore it from git, or fix the file's permissions |
+| `corrupt` | Something can't be read: the `.enc` is damaged or was encrypted for another path, or the plaintext's permissions forbid reading it | `git restore F.enc`, or fix the file's permissions; git-enc touches neither until then |
 
 ### It never loses your work
 
@@ -134,9 +135,11 @@ Put `git enc check` in the script that starts your app (`bin/dev`, a
 - **Anything replaced is backed up first**, encrypted, under
   `.git/git-enc/backup/` (kept 90 days, and always the latest 20).
   `git enc cat FILE` prints one; `git enc cat FILE > .env` puts it back.
-- **History reads in plain text.** In a clone set up with `git enc init`,
-  `git log -p .env.enc` and `git diff` show each version of a secret
-  decrypted (to turn that off: `git config --unset diff.git-enc.textconv`).
+- **History can read in plain text.** To have `git log -p .env.enc` and
+  `git diff` show each version of a secret decrypted in your clone, run
+  `git config diff.git-enc.textconv "git-enc cat --textconv"`. It is off by
+  default, since it puts secrets on screen (and in screen shares) whenever
+  anyone looks at a diff; `git enc diff` shows your own edits on demand.
 - **Git merges and rebases are handled.** After `git enc init`, git merges
   secrets by their plaintext, like any text file: edits to different lines
   merge inside `git pull`. Edits to the same line stop as a conflict, and
@@ -230,7 +233,9 @@ own lines.
   ciphertext.
 
 Several blocks may use different keys (`# git-enc: ops`) for different
-groups of people; each block needs its own key. To move a secret to
+groups of people; each block needs its own key. If you are not in a group,
+say so once, and its secrets stop asking for a key you will never have:
+`git config enc.skipKeys ops` (several: `"ops billing"`). To move a secret to
 another block, move its line there and run `git enc rekey OLD NEW FILE`
 (for example `git enc rekey team ops config/prod.env`).
 
@@ -261,7 +266,9 @@ your shell history.
 only way to decrypt your secrets: if it is lost with your laptop and nobody
 else has it, the secrets in git are gone for good.
 
-For CI, put one or more keys in `GIT_ENC_KEY` and run `git enc update`.
+For CI, put one or more keys in `GIT_ENC_KEY` and run `git enc update`
+(with `git -c enc.skipKeys=ops enc update` for the blocks CI has no key
+for).
 
 ### A new machine
 

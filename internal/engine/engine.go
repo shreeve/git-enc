@@ -92,7 +92,10 @@ type Secret struct {
 	NotIgnored   bool // git does not ignore the plaintext (a `!` rule)
 	PlainIgnored bool // git's ignore rules match the plaintext (tracked or not)
 	EncIgnored   bool // git's ignore rules match F.enc, so it can't be committed
-	entry        *state.Entry
+	// Skipped: no-key, for a key enc.skipKeys says this user does not hold
+	// on purpose (another group's block). It is listed but asks for nothing.
+	Skipped bool
+	entry   *state.Entry
 }
 
 // Problem is something wrong that is not tied to one secret's state.
@@ -262,6 +265,10 @@ func (e *Engine) Scan() error {
 	if err := e.classify(); err != nil {
 		return err
 	}
+	skip := e.SkippedKeys()
+	for _, s := range e.Secrets {
+		s.Skipped = s.Kind == NoKey && s.Key == nil && s.Block != nil && skip[s.Block.Key]
+	}
 	kept := e.Secrets[:0]
 	for _, s := range e.Secrets {
 		if s.Kind != "" {
@@ -296,6 +303,17 @@ func (e *Engine) findSharedKeys() {
 			break
 		}
 	}
+}
+
+// SkippedKeys are the key names in enc.skipKeys (separated by spaces or
+// commas): blocks whose key this user does not hold on purpose, such as
+// another group's secrets, or a CI job's.
+func (e *Engine) SkippedKeys() map[string]bool {
+	res := map[string]bool{}
+	for _, k := range strings.FieldsFunc(e.Repo.ConfigString("enc.skipKeys"), func(r rune) bool { return r == ',' || r == ' ' || r == '\t' }) {
+		res[k] = true
+	}
+	return res
 }
 
 func (e *Engine) managed(p string) bool {
