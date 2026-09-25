@@ -28,8 +28,13 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          cat > notes.md <<NOTES
-          Install on macOS or Linux:
+          # This version's section of CHANGELOG.md, then how to install.
+          awk -v tag="## ${GITHUB_REF_NAME}" '$0 == tag {on=1; next} on && /^## / {exit} on' CHANGELOG.md > notes.md
+          cat >> notes.md <<NOTES
+
+          ## Install
+
+          On macOS or Linux:
 
               brew install shreeve/tap/git-enc
 
