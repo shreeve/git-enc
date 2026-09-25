@@ -14,7 +14,7 @@ type Report struct {
 // ReportRepo describes the repository.
 type ReportRepo struct {
 	Root        string `json:"root"`
-	Initialized bool   `json:"initialized"` // git enc init has installed hooks
+	Initialized bool   `json:"initialized"` // git enc init has set up hooks and merging
 	Uses        bool   `json:"uses_git_enc"`
 }
 
@@ -46,7 +46,7 @@ type ReportSecret struct {
 func (e *Engine) Report() *Report {
 	r := &Report{
 		Version:  1,
-		Repo:     ReportRepo{Root: e.Repo.Root, Initialized: e.HooksInstalled(), Uses: len(e.Spec.Blocks) > 0},
+		Repo:     ReportRepo{Root: e.Repo.Root, Initialized: !e.SetupNeeded(), Uses: len(e.Spec.Blocks) > 0},
 		Keys:     []ReportKey{},
 		Secrets:  []ReportSecret{},
 		Problems: e.Problems,

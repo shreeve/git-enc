@@ -118,6 +118,10 @@ muts = [
  ("status waits for the lock", "internal/engine/engine.go",
   "func OpenStatus(dir string) (*Engine, error) { return open(dir, false, true) }",
   "func OpenStatus(dir string) (*Engine, error) { return open(dir, true, false) }", "TestGuards/status_does"),
+ ("add drops an unmerged .incoming", "internal/engine/actions.go",
+  "if !force && s.Incoming != \"\" && s.PlainHash == s.entry.Kept {", "if false {", "TestLostState"),
+ ("update exits 0 with a conflict left", "cmd/git-enc/main.go",
+  "\t\t\tcode = exitAttention", "\t\t\tcode = exitOK", "TestConflictIncoming"),
 ]
 stale = [name for name, f, old, _, _ in muts if old not in open(f).read()]
 if stale:

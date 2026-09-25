@@ -109,6 +109,9 @@ func (e *Engine) addOne(s *Secret, force, explicit bool) ([]string, error) {
 		if !force && !resolved {
 			return nil, refuse("%s is %s: %s\n  run `%s` first (or add --force to overwrite %s)", s.Path, s.Kind, s.Message, s.Action, s.EncPath)
 		}
+		if !force && s.Incoming != "" && s.PlainHash == s.entry.Kept {
+			return nil, refuse("%s is unchanged since the committed version was put in %s; adding it now would drop that version\n  merge what you need from %s into %s first (or add --force to keep only yours)", s.Path, s.Incoming, s.Incoming, s.Path)
+		}
 	case Outdated, Diverged:
 		if !force {
 			return nil, refuse("%s is %s: %s\n  run `%s` first (or add --force to overwrite %s)", s.Path, s.Kind, s.Message, s.Action, s.EncPath)
@@ -170,6 +173,7 @@ func (e *Engine) addOne(s *Secret, force, explicit bool) ([]string, error) {
 		return nil, err
 	}
 	s.entry.Pending, s.entry.Seen, s.entry.Merge = blob, "", ""
+	s.entry.Kept = ""
 	e.State.Manage(s.Path)
 	if s.Incoming != "" {
 		os.Remove(e.Repo.Abs(s.Incoming))
@@ -352,7 +356,18 @@ func (e *Engine) Update(paths []string, opt UpdateOptions) ([]string, error) {
 		targets = appendNew(targets, s)
 	}
 	var out []string
+	if len(paths) == 0 {
+		// Say what cannot be brought up to date, rather than "up to date".
+		for _, s := range e.Secrets {
+			if s.Kind == NoKey {
+				out = append(out, "skipped "+s.Path+": "+s.Message)
+			}
+		}
+	}
 	if len(targets) == 0 {
+		if len(out) > 0 {
+			return out, nil
+		}
 		return []string{"everything is up to date"}, nil
 	}
 	for _, s := range targets {
@@ -434,7 +449,7 @@ func (e *Engine) updateOne(s *Secret, discard bool) (string, error) {
 	if err := fsx.WriteWorktree(e.Repo.Root, inc, body, 0o600); err != nil {
 		return "", err
 	}
-	s.entry.Seen = s.EncBlob
+	s.entry.Seen, s.entry.Kept = s.EncBlob, s.PlainHash
 	return fmt.Sprintf("%s: kept your copy; the committed version is in %s\n  merge what you need into %s, then `git enc add %s` (or `git enc update --discard %s` to take theirs)",
 		s.Path, inc, s.Path, s.Path, s.Path), nil
 }
@@ -474,7 +489,7 @@ func (e *Engine) replace(s *Secret, body []byte, msg string, keep bool) (string,
 	if s.Incoming != "" {
 		os.Remove(e.Repo.Abs(s.Incoming))
 	}
-	s.entry.Seen = ""
+	s.entry.Seen, s.entry.Kept = "", ""
 	if keep && backup != "" && msg != "" {
 		msg += " (your old copy: `git enc cat " + backup + "`)"
 	}

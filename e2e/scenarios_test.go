@@ -137,7 +137,9 @@ func TestConflictIncoming(t *testing.T) {
 	if r.Code == 0 {
 		t.Fatal("add of a conflicting secret succeeded without --force")
 	}
-	b.Enc("update")
+	if r := b.TryEnc("update"); r.Code != 3 {
+		t.Fatalf("update left a conflict: exit %d, want 3\n%s%s", r.Code, r.Out, r.Err)
+	}
 	if b.Read(".env") != "API_KEY=bob\n" || b.Read(".env.incoming") != "API_KEY=alice\n" {
 		t.Fatalf(".env=%q incoming=%q", b.Read(".env"), b.Read(".env.incoming"))
 	}
@@ -496,11 +498,17 @@ func TestLostState(t *testing.T) {
 	if r := a.TryEnc("add", ".env"); r.Code == 0 {
 		t.Fatal("diverged secret added without --force")
 	}
-	a.Enc("update")
+	if r := a.TryEnc("update"); r.Code != 3 {
+		t.Fatalf("update left a conflict: exit %d, want 3\n%s%s", r.Code, r.Out, r.Err)
+	}
 	if a.Read(".env.incoming") != "API_KEY=two\n" {
 		t.Fatal("diverged update did not write .incoming")
 	}
-	a.Enc("add", ".env")
+	// Adding .env untouched would silently drop the committed version.
+	if r := a.TryEnc("add", ".env"); r.Code != 3 || !strings.Contains(r.Err, "would drop that version") {
+		t.Fatalf("add with .incoming unmerged: exit %d\n%s", r.Code, r.Err)
+	}
+	a.Enc("add", "--force", ".env")
 	a.expectState(".env", "clean")
 }
 
@@ -804,7 +812,9 @@ func TestReviewFindings(t *testing.T) {
 		a.commitPush("bin2")
 		b.Write("key.bin", "\x00\x01C\n")
 		b.Git("pull", "-q")
-		b.Enc("update")
+		if r := b.TryEnc("update"); r.Code != 3 {
+			t.Fatalf("update left a conflict: exit %d, want 3\n%s%s", r.Code, r.Out, r.Err)
+		}
 		if b.Read("key.bin.incoming") != "\x00\x01B\n" {
 			t.Fatal("no .incoming for a binary conflict")
 		}
@@ -1411,4 +1421,44 @@ func TestMergeDriver(t *testing.T) {
 		b.Git("commit", "-q", "--no-edit")
 		b.expectState(".env", "clean")
 	})
+}
+
+// Messages say what to do next, and history reads in plain text.
+func TestMessages(t *testing.T) {
+	w, a, b := team(t)
+	if r := a.TryEnc("add", "--help"); r.Code != 0 || !strings.Contains(r.Out, "--discard") {
+		t.Fatalf("add --help: exit %d\n%s%s", r.Code, r.Out, r.Err)
+	}
+
+	// A clone that has not run init is told so; after init it is not.
+	c := w.clone("carol")
+	if r := c.EncIn(strings.TrimSpace(a.Enc("key", "show", "team")), "key", "add", "team"); !strings.Contains(r.Out, "git enc init") {
+		t.Fatalf("key add:\n%s", r.Out)
+	}
+	if out := c.Enc("status"); !strings.Contains(out, "run `git enc init`") {
+		t.Fatalf("status before init:\n%s", out)
+	}
+	c.Enc("init")
+	if out := c.Enc("status"); strings.Contains(out, "not set up") {
+		t.Fatalf("status after init:\n%s", out)
+	}
+
+	// `git log -p` shows what a secret was.
+	b.Write(".env", "API_KEY=two\n")
+	b.Enc("add", ".env")
+	b.Git("commit", "-q", "-m", "two")
+	if out := b.Git("log", "-p", "-1", "--", ".env.enc"); !strings.Contains(out, "-API_KEY=one") || !strings.Contains(out, "+API_KEY=two") {
+		t.Fatalf("log -p:\n%s", out)
+	}
+
+	// update names what it could not do, instead of "up to date".
+	d := w.clone("dave")
+	d.Enc("init")
+	if r := d.TryEnc("update"); r.Code != 4 || !strings.Contains(r.Out, "skipped .env") {
+		t.Fatalf("update without the key: exit %d\n%s", r.Code, r.Out)
+	}
+
+	if r := a.TryEnc("cat", ".env"); r.Code == 0 || !strings.Contains(r.Err, "did you mean .env.enc") {
+		t.Fatalf("cat of a plaintext: exit %d\n%s", r.Code, r.Err)
+	}
 }

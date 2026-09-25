@@ -24,12 +24,15 @@ import (
 const DriverLine = "*.enc merge=git-enc"
 
 // installDriver defines the merge driver in the clone's config and turns
-// it on in .git/info/attributes.
+// it on in .git/info/attributes. It also sets the diff driver
+// .gitattributes names (diff=git-enc), so `git log -p` and `git diff` show
+// secrets decrypted in this clone. Its output is never cached: git would
+// keep the plaintext in a ref.
 func (e *Engine) installDriver(binary string) error {
-	cmd := shellQuote(binary) + " merge-driver %O %A %B %P"
 	for _, kv := range [][2]string{
 		{"merge.git-enc.name", "git-enc: merge decrypted secrets"},
-		{"merge.git-enc.driver", cmd},
+		{"merge.git-enc.driver", shellQuote(binary) + " merge-driver %O %A %B %P"},
+		{"diff.git-enc.textconv", shellQuote(binary) + " cat --textconv"},
 	} {
 		if _, err := e.Repo.Git("config", "--local", kv[0], kv[1]); err != nil {
 			return err
@@ -56,6 +59,20 @@ func (e *Engine) installDriver(binary string) error {
 		return err
 	}
 	return fsx.WriteAtomic(file, data, 0o644)
+}
+
+// SetupNeeded reports whether `git enc init` still has to run in this
+// clone: its merge driver is off, or git's own hooks directory lacks
+// current git-enc hooks (a hooksPath set elsewhere is the user's to wire).
+func (e *Engine) SetupNeeded() bool {
+	if len(e.Spec.Blocks) == 0 {
+		return false
+	}
+	if !e.DriverInstalled() {
+		return true
+	}
+	dir, err := e.Repo.GitPath("hooks")
+	return err == nil && dir == filepath.Join(e.Repo.CommonDir, "hooks") && !e.HooksInstalled()
 }
 
 // DriverInstalled reports whether the merge driver is on in this clone.

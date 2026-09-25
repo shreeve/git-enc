@@ -34,6 +34,9 @@ type Entry struct {
 	// Seen is a .enc blob the user has already been shown as F.incoming
 	// (or merged into F), so adding F again is a deliberate resolution.
 	Seen string `json:"seen,omitempty"`
+	// Kept is the sha256 of the plaintext when git-enc wrote F.incoming
+	// beside it: adding F unchanged would drop what F.incoming holds.
+	Kept string `json:"kept,omitempty"`
 	// Merge holds the unmerged stage blobs `git enc merge` resolved.
 	Merge string `json:"merge,omitempty"`
 }
