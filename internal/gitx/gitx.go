@@ -75,13 +75,24 @@ func Open(dir string) (*Repo, error) {
 	out, err := Run(dir, nil, "rev-parse", "--path-format=absolute",
 		"--is-bare-repository", "--show-toplevel", "--git-dir", "--git-common-dir")
 	if err != nil {
-		return nil, fmt.Errorf("not in a git repository")
+		if old := checkVersion(dir); old != nil {
+			return nil, old
+		}
+		// git's own words: not a repository, dubious ownership, bad config…
+		var ge *Error
+		if errors.As(err, &ge) && strings.TrimSpace(ge.Stderr) != "" {
+			return nil, errors.New(strings.TrimPrefix(strings.TrimSpace(ge.Stderr), "fatal: "))
+		}
+		return nil, fmt.Errorf("cannot run git: %v", err)
 	}
 	lines := strings.Split(strings.TrimRight(string(out), "\n"), "\n")
 	if len(lines) >= 1 && lines[0] == "true" {
 		return nil, fmt.Errorf("git-enc needs a worktree; this is a bare repository")
 	}
 	if len(lines) != 4 || lines[1] == "" {
+		if old := checkVersion(dir); old != nil {
+			return nil, old
+		}
 		return nil, fmt.Errorf("not inside a git worktree")
 	}
 	r := &Repo{Root: lines[1], GitDir: lines[2], CommonDir: lines[3]}
@@ -89,6 +100,32 @@ func Open(dir string) (*Repo, error) {
 		r.sha256 = true
 	}
 	return r, nil
+}
+
+// MinVersion is the oldest git git-enc works with (for `rev-parse
+// --path-format`).
+var MinVersion = [2]int{2, 31}
+
+// checkVersion returns an error if git is older than MinVersion. It is only
+// consulted to explain a failure, so it costs nothing when git works.
+func checkVersion(dir string) error {
+	out, err := Run(dir, nil, "version")
+	if err != nil {
+		return nil
+	}
+	// "git version 2.39.3 (Apple Git-145)"
+	f := strings.Fields(string(out))
+	if len(f) < 3 {
+		return nil
+	}
+	var major, minor int
+	if _, err := fmt.Sscanf(f[2], "%d.%d", &major, &minor); err != nil {
+		return nil
+	}
+	if major < MinVersion[0] || major == MinVersion[0] && minor < MinVersion[1] {
+		return fmt.Errorf("git-enc needs git %d.%d or later; this is git %s", MinVersion[0], MinVersion[1], f[2])
+	}
+	return nil
 }
 
 // Git runs git at the worktree root.
@@ -164,9 +201,6 @@ func (r *Repo) HashFiles(rels []string) ([]string, error) {
 	}
 	return ids, nil
 }
-
-// HashBytes returns the git blob id of data.
-func (r *Repo) HashBytes(data []byte) (string, error) { return r.BlobID(data), nil }
 
 // BlobID computes the id git gives a blob with these contents.
 func (r *Repo) BlobID(data []byte) string {
@@ -285,7 +319,7 @@ func (r *Repo) History(paths []string) (map[string]map[string]bool, error) {
 	return res, nil
 }
 
-// Exists reports whether a regular file (or anything) is at abs.
+// Exists reports whether anything (a file, directory or symlink) is at abs.
 func Exists(abs string) bool {
 	_, err := os.Lstat(abs)
 	return err == nil

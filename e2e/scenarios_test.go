@@ -5,10 +5,12 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"filippo.io/age"
 )
@@ -862,5 +864,215 @@ func TestNegationAfterBroadRule(t *testing.T) {
 	a.expectState(".env", "clean")
 	if out := a.Git("status", "--porcelain"); strings.Contains(out, " .env\n") || !strings.Contains(out, ".env.enc") {
 		t.Fatalf("status:\n%s", out)
+	}
+}
+
+// When someone leaves: a new key, `git enc rekey OLD NEW`, and the team
+// switches over. An outdated copy stays outdated and an edit stays an edit
+// through the rekey, so nobody's work is lost or overwritten.
+func TestRekey(t *testing.T) {
+	w, a, b := team(t)
+	a.Write("config.yml", "db: one\n")
+	a.Enc("add", "config.yml")
+	a.commitPush("config")
+	b.Git("pull", "-q")
+	b.Enc("update")
+
+	b.Write(".env", "API_KEY=two\n")
+	b.Enc("add", ".env")
+	b.commitPush("two")
+	a.Git("pull", "-q")
+	a.Write("config.yml", "db: mine\n")
+	a.expectState(".env", "outdated")
+	a.expectState("config.yml", "modified")
+
+	a.Enc("key", "new", "team2")
+	out := a.Enc("rekey", "team", "team2")
+	if !strings.Contains(out, "re-encrypted .env.enc") || !strings.Contains(out, "re-encrypted config.yml.enc") {
+		t.Fatalf("rekey:\n%s", out)
+	}
+	a.expectState(".env", "outdated")
+	a.expectState("config.yml", "modified")
+	a.Enc("update")
+	if got := a.Read(".env"); got != "API_KEY=two\n" {
+		t.Fatalf(".env after update = %q", got)
+	}
+	a.Enc("add", "config.yml")
+	a.commitPush("rotate to team2")
+
+	// Bob has only the old key: nothing opens until he imports the new one.
+	b.Git("pull", "-q")
+	b.expectState(".env", "no-key")
+	if r := b.TryEnc("check"); r.Code != 4 {
+		t.Fatalf("check without the new key: exit %d", r.Code)
+	}
+	shareKey(t, a, b, "team2")
+	b.expectState(".env", "clean")
+	b.expectState("config.yml", "outdated")
+	// With its memory lost, git-enc still finds Bob's copy in history,
+	// sealed with the old key.
+	os.Remove(filepath.Join(b.Dir, ".git", "git-enc", "state"))
+	os.Remove(filepath.Join(b.Dir, ".git", "git-enc", "cache"))
+	b.expectState("config.yml", "outdated")
+	b.Enc("update")
+	if got := b.Read("config.yml"); got != "db: mine\n" {
+		t.Fatalf("bob's config.yml = %q", got)
+	}
+
+	// Someone who only ever had the old key cannot read the new files.
+	c := w.clone("carol")
+	shareKey(t, a, c, "team")
+	c.Enc("init")
+	c.expectState(".env", "no-key")
+}
+
+// Moving a secret to another block by hand, then `git enc rekey`.
+func TestRekeyMovedSecret(t *testing.T) {
+	_, a, _ := team(t)
+	a.Enc("key", "new", "ops")
+	if r := a.TryEnc("add", "--key", "ops", ".env"); r.Code == 0 || !strings.Contains(r.Err, "already declared for key team") {
+		t.Fatalf("add --key for a declared secret: exit %d\n%s", r.Code, r.Err)
+	}
+	a.Write(".gitignore", strings.Replace(a.Read(".gitignore"), "/.env\n", "", 1)+"\n# git-enc: ops\n/.env\n# git-enc: end\n")
+	st := a.Status()
+	if st.Secrets[0].State != "no-key" || !strings.Contains(st.Secrets[0].Message, "git enc rekey") {
+		t.Fatalf("moved secret: %+v", st.Secrets[0])
+	}
+	a.Enc("rekey")
+	a.expectState(".env", "clean")
+	if !strings.Contains(a.Read(".gitignore"), "# git-enc: ops ") {
+		t.Fatalf("no fingerprint on the ops block:\n%s", a.Read(".gitignore"))
+	}
+	a.commitPush("move .env to ops")
+}
+
+// A pattern for any directory (`.env`) must not claim a file inside a
+// directory git ignores anyway: its .enc could never be committed. That
+// holds for a path git-enc saw before the directory was ignored, too. A
+// pattern naming the directory itself is still reported.
+func TestIgnoredDirectoryIsNotASecret(t *testing.T) {
+	w := newWorld(t)
+	a := w.clone("alice")
+	a.Enc("key", "new", "team")
+	block := "# git-enc: team\n.env\n/build/*.yml\n# git-enc: end\nbuild/\n"
+	a.Write(".gitignore", block)
+	a.Write(".env", "K=1\n")
+	a.Write("api/.env", "K=2\n")
+	a.Write("node_modules/pkg/.env", "FIXTURE=1\n")
+	a.Write("build/app.yml", "B=1\n")
+	a.expectState("node_modules/pkg/.env", "new")
+	a.Write(".gitignore", "node_modules/\n"+block)
+	a.Enc("add", ".env", "api/.env")
+
+	st := a.Status()
+	var paths []string
+	for _, s := range st.Secrets {
+		paths = append(paths, s.Path)
+	}
+	if strings.Join(paths, " ") != ".env api/.env build/app.yml" {
+		t.Fatalf("secrets: %v", paths)
+	}
+	if len(st.Problems) != 1 || st.Problems[0].Code != "enc-ignored" {
+		t.Fatalf("problems: %+v", st.Problems)
+	}
+	os.RemoveAll(filepath.Join(a.Dir, "build"))
+	if r := a.TryEnc("check"); r.Code != 0 {
+		t.Fatalf("check: exit %d\n%s", r.Code, r.Err)
+	}
+}
+
+// A plaintext copied over a .enc file must not be committed.
+func TestUnencryptedEncRefused(t *testing.T) {
+	_, a, _ := team(t)
+	a.Write(".env.enc", "API_KEY=leaked\n")
+	a.Git("add", ".env.enc")
+	r := a.TryGit("commit", "-q", "-m", "oops")
+	if r.Code == 0 || !strings.Contains(r.Err, "refusing to commit .env.enc: it is not encrypted") {
+		t.Fatalf("pre-commit let an unencrypted .enc through (exit %d):\n%s%s", r.Code, r.Out, r.Err)
+	}
+}
+
+// Small things that should just work.
+func TestUsability(t *testing.T) {
+	t.Run("a backup can be read from where it was reported", func(t *testing.T) {
+		_, a, _ := team(t)
+		a.Write("sub/readme", "x\n")
+		a.Write(".env", "API_KEY=scratch\n")
+		r := a.EncAt("sub", "update", "--discard", "../.env")
+		i := strings.Index(r.Out, "git enc cat ")
+		if r.Code != 0 || i < 0 {
+			t.Fatalf("update --discard: exit %d\n%s%s", r.Code, r.Out, r.Err)
+		}
+		file := strings.TrimRight(strings.Fields(r.Out[i+len("git enc cat "):])[0], "`)")
+		if got := a.EncAt("sub", "cat", file); got.Out != "API_KEY=scratch\n" {
+			t.Fatalf("cat %s from sub/: exit %d %q %s", file, got.Code, got.Out, got.Err)
+		}
+	})
+
+	t.Run("a file named twice is encrypted once", func(t *testing.T) {
+		_, a, _ := team(t)
+		a.Write(".env", "API_KEY=two\n")
+		if out := a.Enc("add", ".env", ".env"); strings.Count(out, "encrypted .env") != 1 {
+			t.Fatalf("add .env .env:\n%s", out)
+		}
+	})
+
+	t.Run("git's own error is shown", func(t *testing.T) {
+		_, a, _ := team(t)
+		cfg := filepath.Join(a.Dir, ".git", "config")
+		data, _ := os.ReadFile(cfg)
+		os.WriteFile(cfg, append(data, "[broken\n"...), 0o644)
+		if r := a.Binary("status"); r.Code != 1 || !strings.Contains(r.Err, "bad config") {
+			t.Fatalf("status with a broken config: exit %d\n%s", r.Code, r.Err)
+		}
+	})
+}
+
+// An interrupted git-enc removes its lock and any plaintext it had in a
+// temporary directory.
+func TestInterruptCleansUp(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("no SIGINT")
+	}
+	_, a, _ := team(t)
+	a.Write(".env", "API_KEY=edited\n")
+	// A git that stalls in the middle of `git enc diff`.
+	real, err := exec.LookPath("git")
+	if gitDir != "" {
+		real, err = filepath.Join(gitDir, "git"), nil
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrap := t.TempDir()
+	script := "#!/bin/sh\nif [ \"$1\" = diff ] && [ \"$2\" = --no-index ]; then sleep 5; fi\nexec '" + real + "' \"$@\"\n"
+	if err := os.WriteFile(filepath.Join(wrap, "git"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(filepath.Join(binDir, "git-enc"), "diff")
+	cmd.Dir = a.Dir
+	cmd.Env = append(a.w.env(a.home), "PATH="+wrap+string(os.PathListSeparator)+pathList())
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	encDir := filepath.Join(a.Dir, ".git", "git-enc")
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if m, _ := filepath.Glob(filepath.Join(encDir, "diff-*")); len(m) > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			cmd.Process.Kill()
+			t.Fatal("git enc diff never started")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	cmd.Process.Signal(os.Interrupt)
+	cmd.Wait()
+	if _, err := os.Stat(filepath.Join(encDir, "lock")); err == nil {
+		t.Error("the lock was left behind")
+	}
+	if m, _ := filepath.Glob(filepath.Join(encDir, "diff-*")); len(m) > 0 {
+		t.Errorf("plaintext left behind in %v", m)
 	}
 }

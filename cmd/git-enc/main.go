@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"syscall"
 
@@ -19,8 +20,19 @@ import (
 	"github.com/shreeve/git-enc/internal/keys"
 )
 
-// version is set at release time with -ldflags "-X main.version=…".
-var version = "0.1.0-dev"
+// version is set at release time with -ldflags "-X main.version=…"; a
+// `go install …@vX.Y.Z` build reads it from the module instead.
+var version = ""
+
+func versionString() string {
+	if version != "" {
+		return version
+	}
+	if bi, ok := debug.ReadBuildInfo(); ok && bi.Main.Version != "" && bi.Main.Version != "(devel)" {
+		return strings.TrimPrefix(bi.Main.Version, "v")
+	}
+	return "dev"
+}
 
 // protocol is the version of the `status --json` contract.
 const protocol = 1
@@ -46,6 +58,7 @@ an encrypted F.enc beside each one):
 
 Everyday commands:
     git enc status             which secrets you edited, which changed in git
+                               (--json for tools, --exit-code as for check)
     git enc add FILE… | --all  encrypt your edits and stage the .enc files
     git enc update [FILE…]     bring your copies up to date (never loses edits)
     git enc diff [FILE…]       show your edits against the committed version
@@ -57,6 +70,10 @@ Setup:
     git enc key add NAME       import a key someone shared (reads stdin)
     git enc key show NAME      print a key (e.g. | pbcopy)
     git enc key list           your keys
+    git enc rekey OLD NEW      move every block from key OLD to key NEW and
+                               re-encrypt its secrets (when someone leaves)
+    git enc rekey              re-encrypt secrets whose block's key changed by
+                               hand (a line moved to another block)
 
 Other:
     git enc check              quiet check for scripts: exit 3 if anything needs doing
@@ -72,7 +89,7 @@ func main() {
 	signal.Notify(sig, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 	go func() {
 		<-sig
-		fsx.RemoveTemps()
+		fsx.Cleanup()
 		os.Exit(130)
 	}()
 	os.Exit(run(os.Args[1:]))
@@ -109,6 +126,8 @@ func run(args []string) int {
 		code, err = cmdKey(rest)
 	case "cat":
 		code, err = cmdCat(rest)
+	case "rekey":
+		code, err = cmdRekey(rest)
 	case "hook":
 		return cmdHook(rest)
 	default:
@@ -165,6 +184,15 @@ func open() (*engine.Engine, error) {
 	return engine.Open(".")
 }
 
+// closeEngine saves the engine's state: deferred with a command's named
+// results, it turns a failed save into the command's error, since a lost
+// save can make git-enc misjudge a secret later.
+func closeEngine(e *engine.Engine, code *int, err *error) {
+	if cerr := e.Close(); cerr != nil && *err == nil {
+		*code, *err = exitError, fmt.Errorf("saving git-enc state: %w", cerr)
+	}
+}
+
 // relPaths turns command-line paths (relative to the current directory)
 // into repository-relative slash paths.
 func relPaths(e *engine.Engine, args []string) ([]string, error) {
@@ -189,7 +217,7 @@ func relPaths(e *engine.Engine, args []string) ([]string, error) {
 			p = filepath.Join(real, filepath.Base(p))
 		}
 		rel, err := filepath.Rel(root, p)
-		if err != nil || rel == "." || strings.HasPrefix(rel, "..") {
+		if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 			return nil, fmt.Errorf("%s is outside the repository", a)
 		}
 		rel = filepath.ToSlash(rel)
@@ -212,15 +240,15 @@ func cmdVersion(args []string) (int, error) {
 		return exitUsage, err
 	}
 	if *asJSON {
-		out, _ := json.Marshal(map[string]any{"version": version, "protocol": protocol})
+		out, _ := json.Marshal(map[string]any{"version": versionString(), "protocol": protocol})
 		fmt.Println(string(out))
 	} else {
-		fmt.Println("git-enc", version)
+		fmt.Println("git-enc", versionString())
 	}
 	return exitOK, nil
 }
 
-func cmdStatus(args []string) (int, error) {
+func cmdStatus(args []string) (code int, err error) {
 	fs := flags("status")
 	asJSON := fs.Bool("json", false, "")
 	exitCode := fs.Bool("exit-code", false, "")
@@ -231,7 +259,7 @@ func cmdStatus(args []string) (int, error) {
 	if err != nil {
 		return exitError, err
 	}
-	defer e.Close()
+	defer closeEngine(e, &code, &err)
 	if *asJSON {
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
@@ -340,7 +368,7 @@ func orUnknown(s string) string {
 	return s
 }
 
-func cmdCheck(args []string) (int, error) {
+func cmdCheck(args []string) (code int, err error) {
 	fs := flags("check")
 	if err := parse(fs, args); err != nil {
 		return exitUsage, err
@@ -349,8 +377,8 @@ func cmdCheck(args []string) (int, error) {
 	if err != nil {
 		return exitError, err
 	}
-	defer e.Close()
-	code := attentionCode(e)
+	defer closeEngine(e, &code, &err)
+	code = attentionCode(e)
 	if code == exitOK {
 		return exitOK, nil
 	}
@@ -373,7 +401,7 @@ func cmdCheck(args []string) (int, error) {
 	return code, nil
 }
 
-func cmdAdd(args []string) (int, error) {
+func cmdAdd(args []string) (code int, err error) {
 	fs := flags("add")
 	all := fs.Bool("all", false, "")
 	fs.BoolVar(all, "A", false, "")
@@ -390,7 +418,7 @@ func cmdAdd(args []string) (int, error) {
 	if err != nil {
 		return exitError, err
 	}
-	defer e.Close()
+	defer closeEngine(e, &code, &err)
 	paths, err := relPaths(e, fs.Args())
 	if err != nil {
 		return exitUsage, err
@@ -403,7 +431,7 @@ func cmdAdd(args []string) (int, error) {
 	return exitOK, nil
 }
 
-func cmdUpdate(args []string) (int, error) {
+func cmdUpdate(args []string) (code int, err error) {
 	fs := flags("update")
 	discard := fs.Bool("discard", false, "")
 	if err := parse(fs, args); err != nil {
@@ -416,7 +444,7 @@ func cmdUpdate(args []string) (int, error) {
 	if err != nil {
 		return exitError, err
 	}
-	defer e.Close()
+	defer closeEngine(e, &code, &err)
 	paths, err := relPaths(e, fs.Args())
 	if err != nil {
 		return exitUsage, err
@@ -436,7 +464,7 @@ func cmdUpdate(args []string) (int, error) {
 	return exitOK, nil
 }
 
-func cmdDiff(args []string) (int, error) {
+func cmdDiff(args []string) (code int, err error) {
 	fs := flags("diff")
 	if err := parse(fs, args); err != nil {
 		return exitUsage, err
@@ -445,7 +473,7 @@ func cmdDiff(args []string) (int, error) {
 	if err != nil {
 		return exitError, err
 	}
-	defer e.Close()
+	defer closeEngine(e, &code, &err)
 	paths, err := relPaths(e, fs.Args())
 	if err != nil {
 		return exitUsage, err
@@ -453,7 +481,7 @@ func cmdDiff(args []string) (int, error) {
 	return exitOK, e.Diff(paths, isTTY(os.Stdout), os.Stdout)
 }
 
-func cmdMerge(args []string) (int, error) {
+func cmdMerge(args []string) (code int, err error) {
 	fs := flags("merge")
 	if err := parse(fs, args); err != nil {
 		return exitUsage, err
@@ -462,7 +490,7 @@ func cmdMerge(args []string) (int, error) {
 	if err != nil {
 		return exitError, err
 	}
-	defer e.Close()
+	defer closeEngine(e, &code, &err)
 	paths, err := relPaths(e, fs.Args())
 	if err != nil {
 		return exitUsage, err
@@ -475,7 +503,7 @@ func cmdMerge(args []string) (int, error) {
 	return exitOK, nil
 }
 
-func cmdInit(args []string) (int, error) {
+func cmdInit(args []string) (code int, err error) {
 	fs := flags("init")
 	if err := parse(fs, args); err != nil {
 		return exitUsage, err
@@ -484,7 +512,7 @@ func cmdInit(args []string) (int, error) {
 	if err != nil {
 		return exitError, err
 	}
-	defer e.Close()
+	defer closeEngine(e, &code, &err)
 	bin, err := binaryPath()
 	if err != nil {
 		return exitError, err
@@ -586,6 +614,32 @@ func cmdKey(args []string) (int, error) {
 		}
 	default:
 		return exitUsage, usageError{"usage: git enc key new|add|show|list [NAME]"}
+	}
+	return exitOK, nil
+}
+
+func cmdRekey(args []string) (code int, err error) {
+	fs := flags("rekey")
+	if err := parse(fs, args); err != nil {
+		return exitUsage, err
+	}
+	var from, to string
+	switch fs.NArg() {
+	case 0:
+	case 2:
+		from, to = fs.Arg(0), fs.Arg(1)
+	default:
+		return exitUsage, usageError{"usage: git enc rekey [OLD NEW]"}
+	}
+	e, err := open()
+	if err != nil {
+		return exitError, err
+	}
+	defer closeEngine(e, &code, &err)
+	out, err := e.Rekey(from, to)
+	printLines(out)
+	if err != nil {
+		return errorCode(err), err
 	}
 	return exitOK, nil
 }

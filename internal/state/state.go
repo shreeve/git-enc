@@ -154,7 +154,10 @@ func (c *Cache) Save() {
 }
 
 // Lock is an exclusive lock on a worktree's git-enc state.
-type Lock struct{ path string }
+type Lock struct {
+	path    string
+	untrack func()
+}
 
 // Acquire takes the lock at path, waiting up to five seconds. A lock older
 // than a minute is left over from a crashed process and is broken.
@@ -168,7 +171,8 @@ func Acquire(path string) (*Lock, error) {
 		if err == nil {
 			f.WriteString(strconv.Itoa(os.Getpid()) + "\n")
 			f.Close()
-			return &Lock{path}, nil
+			// An interrupted git-enc must not leave the next one waiting.
+			return &Lock{path, fsx.Track(path)}, nil
 		}
 		if !errors.Is(err, os.ErrExist) {
 			return nil, err
@@ -185,4 +189,7 @@ func Acquire(path string) (*Lock, error) {
 }
 
 // Release frees the lock.
-func (l *Lock) Release() { os.Remove(l.path) }
+func (l *Lock) Release() {
+	os.Remove(l.path)
+	l.untrack()
+}

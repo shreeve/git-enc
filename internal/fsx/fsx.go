@@ -14,15 +14,37 @@ import (
 // hold plaintext for a moment, so git-enc keeps them out of commits.
 const TempPattern = ".*.git-enc-tmp-*"
 
-var temps sync.Map // name -> struct{}
+var temps sync.Map // path -> struct{}
 
-// RemoveTemps deletes temporary files still being written; it is called
-// when the process is interrupted.
-func RemoveTemps() {
+// Track registers a file or directory to remove if the process is
+// interrupted (a temporary copy of plaintext, a lock); the returned
+// function unregisters it.
+func Track(path string) (untrack func()) {
+	temps.Store(path, struct{}{})
+	return func() { temps.Delete(path) }
+}
+
+// Cleanup removes everything still tracked; it is called when the process
+// is interrupted.
+func Cleanup() {
 	temps.Range(func(k, _ any) bool {
-		os.Remove(k.(string))
+		os.RemoveAll(k.(string))
 		return true
 	})
+}
+
+// TempDir creates a private temporary directory in parent for plaintext.
+// The returned function removes it, as does Cleanup.
+func TempDir(parent, pattern string) (string, func(), error) {
+	dir, err := os.MkdirTemp(parent, pattern)
+	if err != nil {
+		return "", nil, err
+	}
+	untrack := Track(dir)
+	return dir, func() {
+		os.RemoveAll(dir)
+		untrack()
+	}, nil
 }
 
 // WriteAtomic writes data to path by writing a temporary file in the same
@@ -35,8 +57,7 @@ func WriteAtomic(path string, data []byte, perm os.FileMode) error {
 		return err
 	}
 	name := tmp.Name()
-	temps.Store(name, struct{}{})
-	defer temps.Delete(name)
+	defer Track(name)()
 	ok := false
 	defer func() {
 		if !ok {

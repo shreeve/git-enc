@@ -5,7 +5,9 @@ one at a time, and confirm the test that guards it fails.
 Every rule git-enc claims (docs, README) should have a line here. Run from
 the repository root:  python3 scripts/mutations.py
 Each mutation is an exact source substitution; if a line is refactored,
-update its entry here in the same change.
+update its entry here in the same change. A mutation must still compile
+(a build failure would fail the test for the wrong reason), so one that
+does not is reported as BROKEN.
 """
 import os, shutil, subprocess, sys
 
@@ -18,7 +20,8 @@ muts = [
  ("ignore unmerged index stages (red-team critical 2)", "internal/engine/engine.go",
   "case len(s.Unmerged) > 0:", "case false && len(s.Unmerged) > 0:", "TestGitMergeConflict"),
  ("no pre-commit plaintext guard", "internal/engine/hooks.go",
-  "if b != nil || err != nil || e.managed(p) || (name != p && e.managed(name)) || isTemp(p) {", "if false {", "TestPlaintextNeverCommittable"),
+  "if b != nil || err != nil || e.managed(p) || (name != p && e.managed(name)) || isTemp(p) {",
+  "if (b != nil || err != nil || e.managed(p) || (name != p && e.managed(name)) || isTemp(p)) && false {", "TestPlaintextNeverCommittable"),
  ("no symlink check on write", "internal/fsx/fsx.go",
   "if fi.Mode()&os.ModeSymlink != 0 {", "if false {", "TestUnsafePaths"),
  ("no path binding", "internal/envelope/envelope.go",
@@ -55,6 +58,28 @@ muts = [
   "\"check-ignore\", \"-v\", \"--no-index\", \"--\", s.EncPath); err == nil {", "TestNegationAfterBroadRule"),
  ("no .gitattributes -text", "internal/engine/install.go",
   "const AttrLine = \"*.enc -text diff=git-enc merge=binary\"", "const AttrLine = \"*.enc diff=git-enc merge=binary\"", "TestAutocrlfLeavesCiphertextAlone"),
+ ("rekey seals the plaintext", "internal/engine/rekey.go",
+  "sealed, err := envelope.Seal(s.Path, body, s.Key.Recipient)", "sealed, err := envelope.Seal(s.Path, s.plain, s.Key.Recipient)", "TestRekey"),
+ ("rekey turns an outdated copy into an edit", "internal/engine/rekey.go",
+  "\tif s.entry.Pending == old {", "\tif true {", "TestRekey"),
+ ("history before a rekey unreadable", "internal/engine/engine.go",
+  "if err == nil || !(isNoMatch(err) || errors.Is(err, errNoKey)) {", "if true {", "TestRekey"),
+ ("add --key moves a declared secret silently", "internal/engine/actions.go",
+  "if keyName != \"\" && b.Key != keyName {", "if false {", "TestRekeyMovedSecret"),
+ ("files in ignored directories are secrets", "internal/engine/engine.go",
+  "\t\tif !ignored[path.Dir(p)] {", "\t\tif !ignored[path.Dir(p)] || true {", "TestIgnoredDirectoryIsNotASecret"),
+ ("plaintext committed under a .enc name", "internal/engine/hooks.go",
+  "if s.Staged && !envelope.IsSealed(blobs[s.IndexBlob]) {", "if s.Staged && !envelope.IsSealed(blobs[s.IndexBlob]) && false {", "TestUnencryptedEncRefused"),
+ ("interrupt leaves the lock", "internal/state/state.go",
+  "return &Lock{path, fsx.Track(path)}, nil", "return &Lock{path, func() {}}, nil", "TestInterruptCleansUp"),
+ ("interrupt leaves plaintext in a temp dir", "internal/fsx/fsx.go",
+  "\tuntrack := Track(dir)", "\tuntrack := func() {}", "TestInterruptCleansUp"),
+ ("backup path only works from the root", "internal/engine/actions.go",
+  "return e.display(file), nil", "return filepath.ToSlash(strings.TrimPrefix(file, e.Repo.Root+string(filepath.Separator))), nil", "TestUsability/a_backup"),
+ ("a file named twice is encrypted twice", "internal/engine/actions.go",
+  "targets = appendNew(targets, s)", "targets = append(targets, s)", "TestUsability/a_file_named"),
+ ("git's error replaced by a guess", "internal/gitx/gitx.go",
+  "return nil, errors.New(strings.TrimPrefix(strings.TrimSpace(ge.Stderr), \"fatal: \"))", "return nil, errors.New(\"not in a git repository\")", "TestUsability/git's_own"),
 ]
 stale = [name for name, f, old, _, _ in muts if old not in open(f).read()]
 if stale:
@@ -65,6 +90,11 @@ for name, f, old, new, test in muts:
     assert old in src, (name, old)
     shutil.copy(f, f + ".orig")
     open(f, "w").write(src.replace(old, new, 1))
+    if subprocess.run(["go", "vet", "./..."], capture_output=True).returncode != 0:
+        shutil.move(f + ".orig", f)
+        bad += 1
+        print("BROKEN " + name + "  (does not compile or vet; fix the substitution)")
+        continue
     pattern = "/".join("^" + part + "$" if i == 0 else part for i, part in enumerate(test.split("/", 1)))
     r = subprocess.run(["go", "test", "-count=1", "./e2e/", "-run", pattern], capture_output=True, text=True)
     shutil.move(f + ".orig", f)

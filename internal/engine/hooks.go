@@ -5,6 +5,7 @@ import (
 	"path"
 	"strings"
 
+	"github.com/shreeve/git-enc/internal/envelope"
 	"github.com/shreeve/git-enc/internal/fsx"
 	"github.com/shreeve/git-enc/internal/gitx"
 )
@@ -17,12 +18,21 @@ func (e *Engine) Hook(name string) ([]string, bool) {
 	var out []string
 	stop := false
 	if name == "pre-commit" {
+		// If the check cannot run, the commit stops: this guard fails closed.
 		bad, err := e.stagedPlaintext()
 		if err != nil {
-			return []string{"git-enc: " + err.Error()}, false
+			return []string{"git-enc: cannot check this commit for plaintext secrets: " + err.Error()}, true
 		}
 		for _, p := range bad {
 			out = append(out, fmt.Sprintf("git-enc: refusing to commit the plaintext secret %s\n  unstage it with: git rm --cached -- %s", p, p))
+			stop = true
+		}
+		unsealed, err := e.stagedUnsealed()
+		if err != nil {
+			return []string{"git-enc: cannot check this commit for plaintext secrets: " + err.Error()}, true
+		}
+		for _, p := range unsealed {
+			out = append(out, fmt.Sprintf("git-enc: refusing to commit %s: it is not encrypted (only `git enc add` should write it)\n  unstage it with: git restore --staged -- %s", p, p))
 			stop = true
 		}
 	}
@@ -77,6 +87,29 @@ func (e *Engine) stagedPlaintext() ([]string, error) {
 		b, _, err := e.Spec.Match(p)
 		if b != nil || err != nil || e.managed(p) || (name != p && e.managed(name)) || isTemp(p) {
 			bad = append(bad, p)
+		}
+	}
+	return bad, nil
+}
+
+// stagedUnsealed lists staged .enc files of secrets that are not age files:
+// plaintext copied over one (`cp .env .env.enc`) would otherwise be
+// committed, since the plaintext check skips .enc names.
+func (e *Engine) stagedUnsealed() ([]string, error) {
+	var ids []string
+	for _, s := range e.Secrets {
+		if s.Staged {
+			ids = append(ids, s.IndexBlob)
+		}
+	}
+	blobs, err := e.Repo.Blobs(ids)
+	if err != nil {
+		return nil, err
+	}
+	var bad []string
+	for _, s := range e.Secrets {
+		if s.Staged && !envelope.IsSealed(blobs[s.IndexBlob]) {
+			bad = append(bad, s.EncPath)
 		}
 	}
 	return bad, nil

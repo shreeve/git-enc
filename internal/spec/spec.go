@@ -138,7 +138,7 @@ func Parse(data []byte, ignoreCase bool) (*Spec, []Problem) {
 // compile turns a gitignore pattern into a matcher, restricted to the forms
 // git-enc can reason about exactly: file patterns with *, ? and [...].
 func compile(raw string, fold bool) (*Pattern, string) {
-	pat := trimTrailingSpace(raw)
+	pat := TrimTrailingSpace(raw)
 	switch {
 	case strings.HasPrefix(pat, "!"):
 		return nil, "negated patterns (`!`) are not allowed in a git-enc block"
@@ -191,9 +191,9 @@ func hasTrailingComment(pat string) bool {
 	return false
 }
 
-// trimTrailingSpace drops trailing spaces the way git does: a space escaped
-// with a backslash is kept.
-func trimTrailingSpace(s string) string {
+// TrimTrailingSpace drops trailing spaces the way git does in a
+// .gitignore file: a space escaped with a backslash is kept.
+func TrimTrailingSpace(s string) string {
 	for strings.HasSuffix(s, " ") && !strings.HasSuffix(s, "\\ ") {
 		s = s[:len(s)-1]
 	}
@@ -255,6 +255,20 @@ func (s *Spec) Match(rel string) (*Block, *Pattern, error) {
 		}
 	}
 	return hb, hp, nil
+}
+
+// Anchored reports whether a pattern that names a path from the root
+// (`/build/*.yml`, `config/app.yml`) matches rel, as opposed to only a
+// pattern for any directory (`.env`).
+func (s *Spec) Anchored(rel string) bool {
+	for _, b := range s.Blocks {
+		for _, p := range b.Patterns {
+			if p.anchored && p.Match(rel) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // Block returns the first block for the named key.
