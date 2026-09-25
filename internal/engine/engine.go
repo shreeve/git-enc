@@ -116,7 +116,8 @@ type Engine struct {
 
 	ignoreCase bool
 	lock       *state.Lock
-	baseDir    string // per-worktree git-enc dir
+	baseDir    string          // per-worktree git-enc dir
+	ignored    map[string]bool // paths git ignores, from this scan's one check-ignore
 }
 
 // Open opens the repository at dir, takes the git-enc lock, and scans it.
@@ -278,22 +279,19 @@ func (e *Engine) managed(p string) bool {
 func (e *Engine) candidates() ([]string, error) {
 	set := map[string]bool{}
 	var maybe []string // kept unless inside an ignored directory
-	for _, args := range [][]string{
-		{"ls-files", "-z", "--cached", "--", "*.enc"},
-		{"ls-files", "-z", "--others", "--exclude-standard", "--", "*.enc"},
-	} {
-		out, err := e.Repo.Git(args...)
-		if err != nil {
-			return nil, err
-		}
-		for _, p := range gitx.SplitZ(out) {
-			if name := strings.TrimSuffix(p, ".enc"); name != p && name != "" && !strings.HasSuffix(name, "/") {
-				set[name] = true
-			}
+	encs, err := e.Repo.Git("ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", "*.enc")
+	if err != nil {
+		return nil, err
+	}
+	for _, p := range gitx.SplitZ(encs) {
+		if name := strings.TrimSuffix(p, ".enc"); name != p && name != "" && !strings.HasSuffix(name, "/") {
+			set[name] = true
 		}
 	}
+	// Blocks hold no `!` rules, so every block's patterns can go in one
+	// call: a path matches the union exactly when it matches one block.
+	var globs []string
 	for _, b := range e.Spec.Blocks {
-		var globs []string
 		for _, p := range b.Patterns {
 			if lit := p.Literal(); lit != "" {
 				if fi, err := os.Lstat(e.Repo.Abs(lit)); err == nil && !fi.IsDir() {
@@ -303,25 +301,27 @@ func (e *Engine) candidates() ([]string, error) {
 			}
 			globs = append(globs, "--exclude="+spec.TrimTrailingSpace(p.Raw))
 		}
-		if len(globs) == 0 {
-			continue
-		}
+	}
+	if len(globs) > 0 {
 		// git itself decides which files the patterns match: untracked
-		// ones, and tracked ones (plaintext committed before it was listed).
-		for _, which := range []string{"--others", "--cached"} {
-			args := append([]string{"ls-files", "-z", which, "--ignored"}, globs...)
-			out, err := e.Repo.Git(args...)
-			if err != nil {
-				return nil, err
+		// ones ("?"), and tracked ones (plaintext committed before it was
+		// listed), in one call told apart by -t.
+		args := append([]string{"ls-files", "-z", "-t", "--cached", "--others", "--ignored"}, globs...)
+		out, err := e.Repo.Git(args...)
+		if err != nil {
+			return nil, err
+		}
+		for _, rec := range gitx.SplitZ(out) {
+			tag, p, ok := strings.Cut(rec, " ")
+			if !ok {
+				continue
 			}
-			for _, p := range gitx.SplitZ(out) {
-				switch {
-				case strings.HasSuffix(p, ".enc"), strings.HasSuffix(p, ".incoming"):
-				case which == "--others" && !e.Spec.Anchored(p):
-					maybe = append(maybe, p)
-				default:
-					set[p] = true
-				}
+			switch {
+			case strings.HasSuffix(p, ".enc"), strings.HasSuffix(p, ".incoming"):
+			case tag == "?" && !e.Spec.Anchored(p):
+				maybe = append(maybe, p)
+			default:
+				set[p] = true
 			}
 		}
 	}
@@ -341,14 +341,31 @@ func (e *Engine) candidates() ([]string, error) {
 }
 
 // dropIgnoredDirs adds each path to set unless git ignores a directory
-// above it, or it already is there.
+// above it, or it already is there. The one check-ignore it runs also
+// answers, for checkIgnores, whether git ignores each candidate and its
+// .enc.
 func (e *Engine) dropIgnoredDirs(paths []string, set map[string]bool) error {
-	dirs := map[string]bool{}
+	seen := map[string]bool{}
 	var list []string
+	// git refuses the whole call for a path beneath a symlink, so those
+	// are not asked about (no secret can be there: Scan refuses them).
+	ask := func(p string) {
+		if !seen[p] && e.askable(p) {
+			seen[p] = true
+			list = append(list, p)
+		}
+	}
 	for _, p := range paths {
-		if d := path.Dir(p); d != "." && !dirs[d] {
-			dirs[d] = true
-			list = append(list, d)
+		if d := path.Dir(p); d != "." {
+			ask(d)
+		}
+	}
+	for _, group := range [][]string{paths, setKeys(set)} {
+		for _, p := range group {
+			if spec.CheckPath(p) == nil {
+				ask(p)
+				ask(p + ".enc")
+			}
 		}
 	}
 	// git reports a directory inside an ignored one as ignored too.
@@ -356,12 +373,42 @@ func (e *Engine) dropIgnoredDirs(paths []string, set map[string]bool) error {
 	if err != nil {
 		return err
 	}
+	e.ignored = ignored
 	for _, p := range paths {
 		if !ignored[path.Dir(p)] {
 			set[p] = true
 		}
 	}
 	return nil
+}
+
+// askable reports whether git can be asked about rel: no directory above
+// it is a symlink (or not a directory at all).
+func (e *Engine) askable(rel string) bool {
+	d := path.Dir(rel)
+	if d == "." {
+		return true
+	}
+	cur := e.Repo.Root
+	for _, c := range strings.Split(d, "/") {
+		cur = filepath.Join(cur, c)
+		fi, err := os.Lstat(cur)
+		if os.IsNotExist(err) {
+			return true
+		}
+		if err != nil || !fi.IsDir() {
+			return false
+		}
+	}
+	return true
+}
+
+func setKeys(set map[string]bool) []string {
+	out := make([]string, 0, len(set))
+	for p := range set {
+		out = append(out, p)
+	}
+	return out
 }
 
 // readIndex fills in the index and HEAD blobs of every F.enc.
@@ -377,17 +424,11 @@ func (e *Engine) readIndex() error {
 		plain[s.Path] = s
 		pathspec = append(pathspec, ":(literal)"+s.EncPath)
 	}
-	var plainspec []string
 	for _, s := range e.Secrets {
-		plainspec = append(plainspec, ":(literal)"+s.Path)
+		pathspec = append(pathspec, ":(literal)"+s.Path)
 	}
-	if out, err := e.Repo.Git(append([]string{"ls-files", "-z", "--"}, plainspec...)...); err == nil {
-		for _, p := range gitx.SplitZ(out) {
-			if s := plain[p]; s != nil {
-				s.PlainTracked = true
-			}
-		}
-	}
+	// One call for both: whether git tracks each plaintext, and each
+	// F.enc's index entries.
 	out, err := e.Repo.Git(append([]string{"ls-files", "-z", "--stage", "--"}, pathspec...)...)
 	if err != nil {
 		return err
@@ -399,6 +440,9 @@ func (e *Engine) readIndex() error {
 			continue
 		}
 		f := strings.Fields(rec[:tab])
+		if s := plain[rec[tab+1:]]; s != nil {
+			s.PlainTracked = true
+		}
 		s := enc[rec[tab+1:]]
 		if s == nil || len(f) != 3 {
 			continue
@@ -410,7 +454,7 @@ func (e *Engine) readIndex() error {
 		}
 	}
 	if e.Repo.HasHead() {
-		out, err := e.Repo.Git(append([]string{"ls-tree", "-r", "-z", "--full-tree", "HEAD", "--"}, pathspec...)...)
+		out, err := e.Repo.Git(append([]string{"ls-tree", "-r", "-z", "--full-tree", "HEAD", "--"}, pathspec[:len(e.Secrets)]...)...)
 		if err != nil {
 			return err
 		}
@@ -471,26 +515,14 @@ func (e *Engine) readFiles() error {
 	return e.checkIgnores()
 }
 
-// checkIgnores asks git, in one call each, whether every plaintext is
+// checkIgnores uses git's answers to whether every plaintext is
 // ignored (it must be: otherwise it can be committed) and every F.enc is
 // not (otherwise it can't be).
 func (e *Engine) checkIgnores() error {
 	if len(e.Secrets) == 0 {
 		return nil
 	}
-	var plains, encs []string
-	for _, s := range e.Secrets {
-		plains = append(plains, s.Path)
-		encs = append(encs, s.EncPath)
-	}
-	pi, err := e.checkIgnore(plains)
-	if err != nil {
-		return err
-	}
-	ei, err := e.checkIgnore(encs)
-	if err != nil {
-		return err
-	}
+	pi, ei := e.ignored, e.ignored // asked with the candidates, in one call
 	for _, s := range e.Secrets {
 		if s.Block == nil || s.plain == nil && s.EncBlob == "" && !s.PlainTracked {
 			continue // nothing there to commit by mistake, or to fail to commit
@@ -674,6 +706,13 @@ func (e *Engine) committed(need map[*Secret][]string) (map[*Secret]map[string]bo
 	if len(ask) == 0 {
 		return res, nil
 	}
+	// Ask about every secret at once: compare may need the others next,
+	// and one `git log` walks history once however many paths it follows.
+	for _, s := range e.Secrets {
+		if askFor[s.EncPath] == nil {
+			ask = append(ask, s.EncPath)
+		}
+	}
 	hist, err := e.Repo.History(ask)
 	if err != nil {
 		return nil, err
@@ -697,6 +736,11 @@ func (e *Engine) promote() error {
 	need := map[*Secret][]string{}
 	for _, s := range e.Secrets {
 		if s.Key == nil || len(s.Unmerged) > 0 {
+			continue
+		}
+		if e.lock == nil && !e.differs(s) {
+			// Read-only (a hook): nothing is saved, and the base only
+			// matters when the plaintext and F.enc differ.
 			continue
 		}
 		if s.entry.Pending != "" {
@@ -732,6 +776,16 @@ func (e *Engine) promote() error {
 		}
 	}
 	return nil
+}
+
+// differs reports whether s has a plaintext and a readable F.enc that
+// differ: the only case classify consults the base for.
+func (e *Engine) differs(s *Secret) bool {
+	if s.plain == nil || s.EncBlob == "" || s.Block == nil {
+		return false
+	}
+	_, err := e.body(s)
+	return err == nil && s.EncHash != s.PlainHash
 }
 
 // classify sets each secret's Kind.

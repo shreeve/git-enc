@@ -46,10 +46,26 @@ func (e *Error) ExitCode() int {
 	return -1
 }
 
-// Run runs git in dir with the given stdin (may be nil).
-func Run(dir string, stdin []byte, args ...string) ([]byte, error) {
+// command prepares a git command in dir. Variables that change how git
+// reads pathspecs are dropped: git-enc's pathspecs are exact
+// (`:(literal)…`, `*.enc`), and GIT_LITERAL_PATHSPECS=1 would make every
+// one of them fail, and with it the pre-commit guard.
+func command(dir string, args ...string) *exec.Cmd {
 	cmd := exec.Command("git", args...)
 	cmd.Dir = dir
+	for _, kv := range os.Environ() {
+		switch k, _, _ := strings.Cut(kv, "="); k {
+		case "GIT_LITERAL_PATHSPECS", "GIT_GLOB_PATHSPECS", "GIT_NOGLOB_PATHSPECS", "GIT_ICASE_PATHSPECS":
+		default:
+			cmd.Env = append(cmd.Env, kv)
+		}
+	}
+	return cmd
+}
+
+// Run runs git in dir with the given stdin (may be nil).
+func Run(dir string, stdin []byte, args ...string) ([]byte, error) {
+	cmd := command(dir, args...)
 	if stdin != nil {
 		cmd.Stdin = bytes.NewReader(stdin)
 	}
@@ -68,36 +84,63 @@ type Repo struct {
 	GitDir    string // absolute, per worktree
 	CommonDir string // absolute, shared by all worktrees
 	sha256    bool   // the repository uses SHA-256 object ids
+	hasHead   bool   // HEAD points at a commit (git-enc never moves HEAD)
+
+	gitPaths map[string]string          // --git-path answers asked for at Open
+	bools    map[string]string          // boolConfig values, once read
+	history  map[string]map[string]bool // History answers so far
 }
 
-// Open finds the repository containing dir.
+// openGitPaths are the --git-path names asked for at Open, in the same
+// rev-parse call, since nearly every command needs them.
+var openGitPaths = []string{"git-enc", "info/exclude", "hooks"}
+
+// Open finds the repository containing dir. One `git rev-parse` answers
+// everything a command needs to know about the repository's layout: git
+// itself resolves GIT_DIR, GIT_WORK_TREE, gitfiles, core.worktree,
+// safe.directory and the rest.
 func Open(dir string) (*Repo, error) {
-	out, err := Run(dir, nil, "rev-parse", "--path-format=absolute",
-		"--is-bare-repository", "--show-toplevel", "--git-dir", "--git-common-dir")
+	args := []string{"rev-parse", "--path-format=absolute",
+		"--is-bare-repository", "--show-toplevel", "--git-dir", "--git-common-dir", "--show-object-format"}
+	for _, p := range openGitPaths {
+		args = append(args, "--git-path", p)
+	}
+	// Last, so that its failure (no commit yet) comes after every answer.
+	args = append(args, "--verify", "--quiet", "HEAD^{commit}")
+	want := 5 + len(openGitPaths) // lines before HEAD's
+	out, err := Run(dir, nil, args...)
+	lines := strings.Split(strings.TrimRight(string(out), "\n"), "\n")
+	hasHead := err == nil
+	var ge *Error
+	if err != nil && errors.As(err, &ge) && ge.ExitCode() == 1 && strings.TrimSpace(ge.Stderr) == "" && len(lines) == want {
+		err = nil // --verify --quiet: HEAD is unborn
+	}
 	if err != nil {
 		if old := checkVersion(dir); old != nil {
 			return nil, old
 		}
 		// git's own words: not a repository, dubious ownership, bad config…
-		var ge *Error
 		if errors.As(err, &ge) && strings.TrimSpace(ge.Stderr) != "" {
 			return nil, errors.New(strings.TrimPrefix(strings.TrimSpace(ge.Stderr), "fatal: "))
 		}
 		return nil, fmt.Errorf("cannot run git: %v", err)
 	}
-	lines := strings.Split(strings.TrimRight(string(out), "\n"), "\n")
 	if len(lines) >= 1 && lines[0] == "true" {
 		return nil, fmt.Errorf("git-enc needs a worktree; this is a bare repository")
 	}
-	if len(lines) != 4 || lines[1] == "" {
+	if hasHead {
+		want++
+	}
+	if len(lines) != want || lines[1] == "" {
 		if old := checkVersion(dir); old != nil {
 			return nil, old
 		}
 		return nil, fmt.Errorf("not inside a git worktree")
 	}
-	r := &Repo{Root: lines[1], GitDir: lines[2], CommonDir: lines[3]}
-	if f, err := r.Git("rev-parse", "--show-object-format"); err == nil && strings.TrimSpace(string(f)) == "sha256" {
-		r.sha256 = true
+	r := &Repo{Root: lines[1], GitDir: lines[2], CommonDir: lines[3], sha256: lines[4] == "sha256",
+		hasHead: hasHead, gitPaths: map[string]string{}}
+	for i, p := range openGitPaths {
+		r.gitPaths[p] = lines[5+i]
 	}
 	return r, nil
 }
@@ -140,6 +183,9 @@ func (r *Repo) GitIn(stdin []byte, args ...string) ([]byte, error) {
 // (`git rev-parse --git-path`), so per-worktree and shared files land
 // where git itself keeps them.
 func (r *Repo) GitPath(name string) (string, error) {
+	if p, ok := r.gitPaths[name]; ok {
+		return p, nil
+	}
 	out, err := r.Git("rev-parse", "--path-format=absolute", "--git-path", name)
 	if err != nil {
 		return "", err
@@ -161,8 +207,22 @@ func (r *Repo) Config(key string) string {
 	return strings.TrimRight(string(out), "\n")
 }
 
+// boolConfig are the boolean settings git-enc reads, fetched together the
+// first time any of them is asked for.
+var boolConfig = []string{"core.ignorecase", "enc.requireadded"}
+
 // ConfigBool reads a boolean config value with a default.
 func (r *Repo) ConfigBool(key string, def bool) bool {
+	lk := strings.ToLower(key) // no subsections: the whole name is case-insensitive
+	for _, k := range boolConfig {
+		if k == lk {
+			return r.cachedBool(lk, def)
+		}
+	}
+	return r.configBool(key, def)
+}
+
+func (r *Repo) configBool(key string, def bool) bool {
 	out, err := r.Git("config", "--type=bool", "--get", key)
 	if err != nil {
 		return def
@@ -172,6 +232,35 @@ func (r *Repo) ConfigBool(key string, def bool) bool {
 		return def
 	}
 	return v
+}
+
+// cachedBool reads every boolConfig key with one `git config`, which
+// normalizes each value (yes, on, 1…) to true or false. If any value is
+// malformed that call fails, and each key is read on its own, so one bad
+// setting cannot change another's.
+func (r *Repo) cachedBool(key string, def bool) bool {
+	if r.bools == nil {
+		r.bools = map[string]string{}
+		re := "^(" + strings.ReplaceAll(strings.Join(boolConfig, "|"), ".", `\.`) + ")$"
+		out, err := r.Git("config", "-z", "--type=bool", "--get-regexp", re)
+		var ge *Error
+		switch {
+		case err == nil:
+			for _, rec := range SplitZ(out) {
+				k, v, _ := strings.Cut(rec, "\n")
+				r.bools[k] = v // the last value wins, as in git
+			}
+		case errors.As(err, &ge) && ge.ExitCode() == 1: // none set
+		default:
+			r.bools = nil
+			return r.configBool(key, def)
+		}
+	}
+	v, ok := r.bools[key]
+	if !ok {
+		return def
+	}
+	return v == "true"
 }
 
 // SplitZ splits NUL-terminated output.
@@ -222,8 +311,7 @@ func (r *Repo) Blobs(ids []string) (map[string][]byte, error) {
 	if len(ids) == 0 {
 		return res, nil
 	}
-	cmd := exec.Command("git", "cat-file", "--batch")
-	cmd.Dir = r.Root
+	cmd := command(r.Root, "cat-file", "--batch")
 	cmd.Stdin = strings.NewReader(strings.Join(ids, "\n") + "\n")
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -264,22 +352,47 @@ func (r *Repo) Blobs(ids []string) (map[string][]byte, error) {
 }
 
 // HasHead reports whether HEAD points at a commit.
-func (r *Repo) HasHead() bool {
-	_, err := r.Git("rev-parse", "--verify", "--quiet", "HEAD^{commit}")
-	return err == nil
-}
+// It is read once, at Open: git-enc never commits or moves HEAD.
+func (r *Repo) HasHead() bool { return r.hasHead }
 
 // History returns, for each path, every blob id it has had in commits
 // reachable from HEAD, local branches, remote-tracking branches and tags.
 // Stashes do not count: a version counts as "committed" only if it can be
 // reached from history people share.
+//
+// Answers are kept for the life of the Repo (git-enc never commits or
+// moves a ref), so only paths not asked about before cost a `git log`.
+// The returned sets must not be modified.
 func (r *Repo) History(paths []string) (map[string]map[string]bool, error) {
+	if r.history == nil {
+		r.history = map[string]map[string]bool{}
+	}
+	var todo []string
+	for _, p := range paths {
+		if _, ok := r.history[p]; !ok {
+			todo = append(todo, p)
+		}
+	}
+	if len(todo) > 0 {
+		got, err := r.history1(todo)
+		if err != nil {
+			return nil, err
+		}
+		for p, set := range got {
+			r.history[p] = set
+		}
+	}
+	res := make(map[string]map[string]bool, len(paths))
+	for _, p := range paths {
+		res[p] = r.history[p]
+	}
+	return res, nil
+}
+
+func (r *Repo) history1(paths []string) (map[string]map[string]bool, error) {
 	res := make(map[string]map[string]bool, len(paths))
 	for _, p := range paths {
 		res[p] = map[string]bool{}
-	}
-	if len(paths) == 0 {
-		return res, nil
 	}
 	args := []string{"log", "--branches", "--remotes", "--tags"}
 	if r.HasHead() {

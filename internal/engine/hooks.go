@@ -53,6 +53,27 @@ func (e *Engine) Hook(name string) ([]string, bool) {
 	return out, stop
 }
 
+// SameSecrets reports whether commits a and b (a post-checkout hook's
+// arguments) have the same .enc files and root .gitignore, so a switch
+// between them changed nothing the reminders are about. It costs one
+// `git diff-tree` and never opens the repository; any doubt (a null id
+// after a clone, an error) answers false.
+func SameSecrets(dir, a, b string) bool {
+	if a == b {
+		return true
+	}
+	out, err := gitx.Run(dir, nil, "diff-tree", "-r", "-z", "--no-renames", "--name-only", a, b)
+	if err != nil {
+		return false
+	}
+	for _, p := range gitx.SplitZ(out) {
+		if p == ".gitignore" || strings.HasSuffix(p, ".enc") {
+			return false
+		}
+	}
+	return true
+}
+
 // Reminders describes secrets that need `git enc update` or attention.
 func (e *Engine) Reminders() []string {
 	var out []string

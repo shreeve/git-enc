@@ -89,7 +89,7 @@ func (e *Engine) addOne(s *Secret, force, explicit bool) ([]string, error) {
 		}
 		if s.EncDirty || s.IndexBlob == "" || s.EncDeleted {
 			if s.EncDeleted {
-				if _, err := e.Repo.Git("checkout", "-q", "--", ":(literal)"+s.EncPath); err != nil {
+				if err := e.restoreEnc(s); err != nil {
 					return nil, err
 				}
 			}
@@ -355,7 +355,7 @@ func (e *Engine) updateOne(s *Secret, discard bool) (string, error) {
 		return "", refuse("%s: git does not ignore it (a `!` rule in a .gitignore?); refusing to write plaintext git could commit", s.Path)
 	}
 	if s.EncDeleted {
-		if _, err := e.Repo.Git("checkout", "-q", "--", ":(literal)"+s.EncPath); err != nil {
+		if err := e.restoreEnc(s); err != nil {
 			return "", err
 		}
 	}
@@ -410,6 +410,26 @@ func (e *Engine) updateOne(s *Secret, discard bool) (string, error) {
 	s.entry.Seen = s.EncBlob
 	return fmt.Sprintf("%s: kept your copy; the committed version is in %s\n  merge what you need into %s, then `git enc add %s` (or `git enc update --discard %s` to take theirs)",
 		s.Path, inc, s.Path, s.Path, s.Path), nil
+}
+
+// restoreEnc puts back a deleted F.enc from git's copy (the index's, or
+// HEAD's after `git rm`), and stages it if the index had lost it. It
+// writes the file itself: `git checkout` and `git restore` would run the
+// user's post-checkout hook in the middle of a git-enc command.
+func (e *Engine) restoreEnc(s *Secret) error {
+	data, err := e.encData(s)
+	if err != nil {
+		return err
+	}
+	if err := fsx.WriteWorktree(e.Repo.Root, s.EncPath, data, 0o644); err != nil {
+		return err
+	}
+	if s.IndexBlob == "" {
+		if _, err := e.Repo.Git("add", "--", ":(literal)"+s.EncPath); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // replace overwrites the plaintext with body, first saving an encrypted
