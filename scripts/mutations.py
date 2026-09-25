@@ -53,9 +53,9 @@ muts = [
   "\tcase hasTrailingComment(pat):", "\tcase false:", "TestPatterns"),
  ("unignored plaintext written (review L1)", "internal/engine/actions.go",
   "\tif s.NotIgnored {\n\t\treturn \"\", refuse(", "\tif false {\n\t\treturn \"\", refuse(", "TestReviewFindings/L1"),
- ("negation read as ignored (v0.1.0 bug)", "internal/engine/actions.go",
-  "\"check-ignore\", \"-q\", \"--no-index\", \"--\", s.EncPath); err == nil {",
-  "\"check-ignore\", \"-v\", \"--no-index\", \"--\", s.EncPath); err == nil {", "TestNegationAfterBroadRule"),
+ ("negation read as ignored (v0.1.0 bug)", "internal/engine/engine.go",
+  "\"check-ignore\", \"-z\", \"--no-index\", \"--stdin\"",
+  "\"check-ignore\", \"-v\", \"-z\", \"--no-index\", \"--stdin\"", "TestNegationAfterBroadRule"),
  ("no .gitattributes -text", "internal/engine/install.go",
   "const AttrLine = \"*.enc -text diff=git-enc merge=binary\"", "const AttrLine = \"*.enc diff=git-enc merge=binary\"", "TestAutocrlfLeavesCiphertextAlone"),
  ("rekey seals the plaintext", "internal/engine/rekey.go",
@@ -109,6 +109,15 @@ muts = [
   "if err != nil || conflicts > 0 {", "if err != nil || conflicts >= 0 {", "TestMergeDriver/different"),
  ("one-sided merge resolution committed", "internal/engine/driver.go",
   "bad = append(bad, s.Path)", "_ = s", "TestMergeDriver/taking"),
+ ("base only advanced from the cache", "internal/engine/engine.go",
+  "if _, ok := e.Cache.Hashes[b]; !ok {", "if _, ok := e.Cache.Hashes[b]; false && !ok {", "TestGuards/the_cache"),
+ ("outdated copy replaced without a backup", "internal/engine/actions.go",
+  "backup, err := e.backup(s)", "backup, err := \"\", error(nil)", "TestGuards/every_replaced"),
+ ("add stops halfway on an ignored .enc", "internal/engine/actions.go",
+  "\t\tif ignored[p] {", "\t\tif false && ignored[p] {", "TestGuards/a_refused_add"),
+ ("status waits for the lock", "internal/engine/engine.go",
+  "func OpenStatus(dir string) (*Engine, error) { return open(dir, false, true) }",
+  "func OpenStatus(dir string) (*Engine, error) { return open(dir, true, false) }", "TestGuards/status_does"),
 ]
 stale = [name for name, f, old, _, _ in muts if old not in open(f).read()]
 if stale:

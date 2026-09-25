@@ -90,6 +90,8 @@ type Secret struct {
 	EncDeleted   bool
 	PlainTracked bool // git tracks the plaintext itself
 	NotIgnored   bool // git does not ignore the plaintext (a `!` rule)
+	PlainIgnored bool // git's ignore rules match the plaintext (tracked or not)
+	EncIgnored   bool // git's ignore rules match F.enc, so it can't be committed
 	entry        *state.Entry
 }
 
@@ -120,14 +122,19 @@ type Engine struct {
 }
 
 // Open opens the repository at dir, takes the git-enc lock, and scans it.
-func Open(dir string) (*Engine, error) { return open(dir, true) }
+func Open(dir string) (*Engine, error) { return open(dir, true, false) }
+
+// OpenStatus opens the repository for a command that only reports (status,
+// check, diff): it takes the lock if it is free, to save what it learns,
+// and otherwise scans without saving rather than wait for another git-enc.
+func OpenStatus(dir string) (*Engine, error) { return open(dir, false, true) }
 
 // OpenReadOnly scans without taking the lock or saving anything, for hooks:
 // they must work (and the pre-commit guard must hold) even while another
 // git-enc runs or after one was killed holding the lock.
-func OpenReadOnly(dir string) (*Engine, error) { return open(dir, false) }
+func OpenReadOnly(dir string) (*Engine, error) { return open(dir, false, false) }
 
-func open(dir string, write bool) (*Engine, error) {
+func open(dir string, write, try bool) (*Engine, error) {
 	repo, err := gitx.Open(dir)
 	if err != nil {
 		return nil, err
@@ -143,8 +150,13 @@ func open(dir string, write bool) (*Engine, error) {
 		}
 		return nil, err
 	}
-	if write {
+	switch {
+	case write:
 		if e.lock, err = state.Acquire(filepath.Join(e.baseDir, "lock")); err != nil {
+			return nil, err
+		}
+	case try:
+		if e.lock, err = state.TryAcquire(filepath.Join(e.baseDir, "lock")); err != nil {
 			return nil, err
 		}
 	}
@@ -155,7 +167,7 @@ func open(dir string, write bool) (*Engine, error) {
 	if e.Keys, err = keys.Load(); err != nil {
 		return fail(err)
 	}
-	if write {
+	if e.lock != nil {
 		// Before anything is written: keep temporary files out of commits.
 		if err := e.syncExclude(); err != nil {
 			return fail(err)
@@ -554,6 +566,7 @@ func (e *Engine) checkIgnores() error {
 		if s.Block == nil || s.plain == nil && s.EncBlob == "" && !s.PlainTracked {
 			continue // nothing there to commit by mistake, or to fail to commit
 		}
+		s.PlainIgnored, s.EncIgnored = pi[s.Path], ei[s.EncPath]
 		if !pi[s.Path] && !s.PlainTracked {
 			s.NotIgnored = true
 			e.Problems = append(e.Problems, Problem{Code: "not-ignored", Path: s.Path,
@@ -791,7 +804,14 @@ func (e *Engine) promote() error {
 				continue
 			}
 			if b == s.entry.Pending {
-				if h, ok := e.Cache.Hashes[b]; ok {
+				// The cache may have been deleted since `git enc add`.
+				blobs := map[string][]byte{}
+				if _, ok := e.Cache.Hashes[b]; !ok {
+					if blobs, err = e.Repo.Blobs([]string{b}); err != nil {
+						return err
+					}
+				}
+				if h, err := e.hashOf(s, b, blobs); err == nil {
 					s.entry.BaseBlob, s.entry.BaseHash = b, h
 				}
 				s.entry.Pending = ""
