@@ -25,6 +25,10 @@ type Block struct {
 	Fingerprint string // short key fingerprint; "" if the header omits it
 	Start, End  int    // 1-based line numbers of the two marker lines
 	Patterns    []*Pattern
+	// Lines holds every pattern line as written, including ones git-enc
+	// refuses: git still ignores what they match, so the pre-commit guard
+	// asks git about all of them.
+	Lines []string
 	// Unterminated blocks run to the end of the file; they are reported
 	// as problems and never edited.
 	Unterminated bool
@@ -117,6 +121,7 @@ func Parse(data []byte, ignoreCase bool) (*Spec, []Problem) {
 		if strings.TrimSpace(raw) == "" || strings.HasPrefix(raw, "#") {
 			continue
 		}
+		cur.Lines = append(cur.Lines, raw)
 		p, err := compile(raw, ignoreCase)
 		if err != "" {
 			probs = append(probs, Problem{n, err})
@@ -144,6 +149,8 @@ func compile(raw string, fold bool) (*Pattern, string) {
 		return nil, "negated patterns (`!`) are not allowed in a git-enc block"
 	case strings.HasSuffix(pat, "/"):
 		return nil, fmt.Sprintf("directory pattern %q would also hide the .enc files; list files instead (e.g. %q)", pat, strings.TrimSuffix(pat, "/")+"/*")
+	case strings.Contains(pat, "[:"):
+		return nil, "character classes like `[[:digit:]]` are not supported in a git-enc block; use `[0-9]` or list the paths"
 	case strings.Contains(pat, "**"):
 		return nil, "`**` is not supported in a git-enc block; list the paths or use one `*` per directory level"
 	case strings.HasSuffix(pat, ".enc"):

@@ -81,6 +81,12 @@ func (e *Engine) Add(paths []string, opt AddOptions) ([]string, error) {
 
 func (e *Engine) addOne(s *Secret, force, explicit bool) ([]string, error) {
 	resolved := explicit && s.entry.Seen != "" && s.entry.Seen == s.EncBlob
+	if s.Kind == Missing && s.EncDeleted && s.plain != nil && s.PlainHash == s.EncHash {
+		if err := e.restoreEnc(s); err != nil {
+			return nil, err
+		}
+		return []string{"restored " + s.EncPath}, nil
+	}
 	switch s.Kind {
 	case New, Modified:
 	case Clean:
@@ -359,10 +365,10 @@ func (e *Engine) updateOne(s *Secret, discard bool) (string, error) {
 			return "", err
 		}
 	}
+	if s.EncDeleted && s.plain != nil && s.PlainHash == s.EncHash {
+		return "restored " + s.EncPath, nil
+	}
 	if s.Kind == Clean {
-		if s.EncDeleted {
-			return "restored " + s.EncPath, nil
-		}
 		return "", nil
 	}
 	body, err := e.body(s)
@@ -511,7 +517,7 @@ func (e *Engine) merge3(s *Secret, theirs []byte) ([]byte, bool, error) {
 	if !ok {
 		return nil, false, nil
 	}
-	base, err := e.openAny(s, data)
+	base, err := e.open(s, data)
 	if err != nil {
 		return nil, false, nil
 	}
@@ -531,11 +537,14 @@ func (e *Engine) mergeFile(ours, base, theirs []byte, lo, lb, lt string) ([]byte
 	}
 	defer done()
 	files := []string{filepath.Join(dir, "ours"), filepath.Join(dir, "base"), filepath.Join(dir, "theirs")}
+	release := fsx.Hold()
 	for i, b := range [][]byte{ours, base, theirs} {
 		if err := os.WriteFile(files[i], b, 0o600); err != nil {
+			release()
 			return nil, 0, err
 		}
 	}
+	release()
 	out, err := gitx.Run(dir, nil, "merge-file", "-p", "-L", lo, "-L", lb, "-L", lt, files[0], files[1], files[2])
 	if err != nil {
 		var ge *gitx.Error
@@ -576,6 +585,9 @@ func (e *Engine) Merge(paths []string) ([]string, error) {
 	}
 	var out []string
 	for _, s := range targets {
+		if s.plainErr != nil {
+			return out, refuse("cannot read %s (%v); git-enc will not touch it until it can", s.Path, s.plainErr)
+		}
 		if s.Key == nil {
 			return out, &KeyError{fmt.Sprintf("%s: %s", s.Path, e.noKeyMessage(s.Block))}
 		}
@@ -594,7 +606,7 @@ func (e *Engine) Merge(paths []string) ([]string, error) {
 		}
 		side := map[int][]byte{}
 		for st, b := range s.Unmerged {
-			body, err := e.openAny(s, blobs[b])
+			body, err := e.open(s, blobs[b])
 			if err != nil {
 				return out, fmt.Errorf("%s: cannot decrypt stage %d: %v", s.Path, st, err)
 			}
@@ -697,13 +709,8 @@ func (e *Engine) Diff(paths []string, color bool, w io.Writer) error {
 		}
 		a := filepath.Join(dir, "a", filepath.FromSlash(s.Path))
 		b := filepath.Join(dir, "b", filepath.FromSlash(s.Path))
-		for f, data := range map[string][]byte{a: committed, b: s.plain} {
-			if err := os.MkdirAll(filepath.Dir(f), 0o700); err != nil {
-				return err
-			}
-			if err := os.WriteFile(f, data, 0o600); err != nil {
-				return err
-			}
+		if err := writeTemps(map[string][]byte{a: committed, b: s.plain}); err != nil {
+			return err
 		}
 		args := []string{"diff", "--no-index", "--no-prefix", "--no-ext-diff"}
 		if color {
@@ -716,6 +723,20 @@ func (e *Engine) Diff(paths []string, color bool, w io.Writer) error {
 			return err
 		}
 		w.Write(out)
+	}
+	return nil
+}
+
+// writeTemps writes plaintext files into a tracked temporary directory.
+func writeTemps(files map[string][]byte) error {
+	defer fsx.Hold()()
+	for f, data := range files {
+		if err := os.MkdirAll(filepath.Dir(f), 0o700); err != nil {
+			return err
+		}
+		if err := os.WriteFile(f, data, 0o600); err != nil {
+			return err
+		}
 	}
 	return nil
 }

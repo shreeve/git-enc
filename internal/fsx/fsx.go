@@ -14,7 +14,18 @@ import (
 // hold plaintext for a moment, so git-enc keeps them out of commits.
 const TempPattern = ".*.git-enc-tmp-*"
 
-var temps sync.Map // path -> struct{}
+var (
+	temps sync.Map   // path -> struct{}
+	mu    sync.Mutex // held while writing plaintext to a temporary file; Cleanup takes it for good
+)
+
+// Hold is taken while writing plaintext into a tracked temporary file or
+// directory, so an interrupt cannot remove the directory halfway and let
+// the rest of the write land after it. It returns the release function.
+func Hold() func() {
+	mu.Lock()
+	return mu.Unlock
+}
 
 // Track registers a file or directory to remove if the process is
 // interrupted (a temporary copy of plaintext, a lock); the returned
@@ -25,8 +36,10 @@ func Track(path string) (untrack func()) {
 }
 
 // Cleanup removes everything still tracked; it is called when the process
-// is interrupted.
+// is interrupted, which must exit right after: it waits for a write in
+// progress, and no other write can start.
 func Cleanup() {
+	mu.Lock()
 	temps.Range(func(k, _ any) bool {
 		os.RemoveAll(k.(string))
 		return true
@@ -36,6 +49,7 @@ func Cleanup() {
 // TempDir creates a private temporary directory in parent for plaintext.
 // The returned function removes it, as does Cleanup.
 func TempDir(parent, pattern string) (string, func(), error) {
+	defer Hold()() // created and tracked as one step
 	dir, err := os.MkdirTemp(parent, pattern)
 	if err != nil {
 		return "", nil, err
@@ -51,6 +65,7 @@ func TempDir(parent, pattern string) (string, func(), error) {
 // directory, syncing it, and renaming it into place. A reader never sees a
 // half-written file, and an interruption leaves the old file intact.
 func WriteAtomic(path string, data []byte, perm os.FileMode) error {
+	defer Hold()()
 	dir := filepath.Dir(path)
 	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".git-enc-tmp-*")
 	if err != nil {

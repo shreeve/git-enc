@@ -72,8 +72,8 @@ Setup:
     git enc key list           your keys
     git enc rekey OLD NEW      move every block from key OLD to key NEW and
                                re-encrypt its secrets (when someone leaves)
-    git enc rekey              re-encrypt secrets whose block's key changed by
-                               hand (a line moved to another block)
+    git enc rekey OLD NEW FILE…  re-encrypt secrets whose line you moved into
+                               the block for key NEW
 
 Other:
     git enc check              quiet check for scripts: exit 3 if anything needs doing
@@ -623,20 +623,19 @@ func cmdRekey(args []string) (code int, err error) {
 	if err := parse(fs, args); err != nil {
 		return exitUsage, err
 	}
-	var from, to string
-	switch fs.NArg() {
-	case 0:
-	case 2:
-		from, to = fs.Arg(0), fs.Arg(1)
-	default:
-		return exitUsage, usageError{"usage: git enc rekey [OLD NEW]"}
+	if fs.NArg() < 2 {
+		return exitUsage, usageError{"usage: git enc rekey OLD NEW [FILE…]"}
 	}
 	e, err := open()
 	if err != nil {
 		return exitError, err
 	}
 	defer closeEngine(e, &code, &err)
-	out, err := e.Rekey(from, to)
+	paths, err := relPaths(e, fs.Args()[2:])
+	if err != nil {
+		return exitUsage, err
+	}
+	out, err := e.Rekey(fs.Arg(0), fs.Arg(1), paths)
 	printLines(out)
 	if err != nil {
 		return errorCode(err), err
@@ -680,6 +679,19 @@ func cmdHook(args []string) int {
 		return exitOK
 	}
 	out, stop := e.Hook(args[0])
+	if args[0] == "pre-push" {
+		// Fails closed: a push that cannot be checked could carry plaintext.
+		refs, _ := io.ReadAll(io.LimitReader(os.Stdin, 1<<20))
+		bad, err := e.OutgoingPlaintext(string(refs))
+		if err != nil {
+			out = append(out, "git-enc: cannot check this push for plaintext secrets: "+err.Error())
+			stop = true
+		}
+		for _, p := range bad {
+			out = append(out, fmt.Sprintf("git-enc: refusing to push: a commit being pushed contains the plaintext secret %s\n  it has not left this machine yet, so the secret itself is safe: remove it from those commits\n  (find them with: git log --oneline --not --remotes -- %s), then push again", p, p))
+			stop = true
+		}
+	}
 	for _, l := range out {
 		fmt.Fprintln(os.Stderr, l)
 	}
