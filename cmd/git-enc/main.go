@@ -257,7 +257,7 @@ func cmdStatus(args []string) (code int, err error) {
 	if err := parse(fs, args); err != nil {
 		return exitUsage, err
 	}
-	e, err := open()
+	e, err := engine.OpenStatus(".")
 	if err != nil {
 		return exitError, err
 	}
@@ -375,7 +375,7 @@ func cmdCheck(args []string) (code int, err error) {
 	if err := parse(fs, args); err != nil {
 		return exitUsage, err
 	}
-	e, err := open()
+	e, err := engine.OpenStatus(".")
 	if err != nil {
 		return exitError, err
 	}
@@ -471,7 +471,7 @@ func cmdDiff(args []string) (code int, err error) {
 	if err := parse(fs, args); err != nil {
 		return exitUsage, err
 	}
-	e, err := open()
+	e, err := engine.OpenStatus(".")
 	if err != nil {
 		return exitError, err
 	}

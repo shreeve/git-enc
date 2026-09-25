@@ -131,6 +131,10 @@ func (e *Engine) addOne(s *Secret, force, explicit bool) ([]string, error) {
 	if !force && hasMarkers(s.plain) {
 		return nil, refuse("%s has conflict markers (<<<<<<<); resolve them, or add --force", s.Path)
 	}
+	// Before changing anything: a refusal must leave nothing half done.
+	if err := e.checkIgnored(s); err != nil {
+		return nil, err
+	}
 	var out []string
 	if s.PlainTracked {
 		if _, err := e.Repo.Git("rm", "--cached", "-q", "--", ":(literal)"+s.Path); err != nil {
@@ -147,9 +151,6 @@ func (e *Engine) addOne(s *Secret, force, explicit bool) ([]string, error) {
 		if s.Kind == Clean && !s.EncDirty && s.IndexBlob != "" {
 			return out, nil
 		}
-	}
-	if err := e.checkIgnored(s); err != nil {
-		return nil, err
 	}
 	if s.Block.Fingerprint == "" {
 		if err := e.setFingerprint(s.Block, s.Key.Fingerprint); err != nil {
@@ -177,24 +178,29 @@ func (e *Engine) addOne(s *Secret, force, explicit bool) ([]string, error) {
 }
 
 // checkIgnored makes sure git ignores the plaintext and does not ignore the
-// ciphertext. A later negation in .gitignore, or a pattern broad enough to
-// match F.enc, would break one or the other.
+// ciphertext, using the scan's answers. A later negation in .gitignore, or
+// a pattern broad enough to match F.enc, would break one or the other.
 func (e *Engine) checkIgnored(s *Secret) error {
-	if _, err := e.Repo.Git("check-ignore", "-q", "--no-index", "--", s.Path); err != nil {
+	if !s.PlainIgnored {
 		return refuse("%s is declared in .gitignore but git does not ignore it (a `!` rule?); fix that first", s.Path)
 	}
-	// Decide with -q: with -v, git also reports a path matched by a `!`
-	// rule (which un-ignores it), and exits 0 for it.
-	if _, err := e.Repo.Git("check-ignore", "-q", "--no-index", "--", s.EncPath); err == nil {
-		out, _ := e.Repo.Git("check-ignore", "-v", "--no-index", "--", s.EncPath)
-		src := strings.SplitN(strings.TrimSpace(string(out)), "\t", 2)[0]
-		hint := ""
-		if strings.HasSuffix(src, "/") {
-			hint = " (a rule for a whole directory cannot be undone that way: write `dir/*` instead of `dir/`)"
-		}
-		return refuse("%s would be ignored by git (%s); add a line `!*.enc` after that rule, or narrow it%s", s.EncPath, src, hint)
+	if s.EncIgnored {
+		return e.encIgnoredError(s.EncPath)
 	}
 	return nil
+}
+
+// encIgnoredError explains which rule makes git ignore an encrypted file.
+// (-v only names the rule: it also reports paths a `!` rule un-ignores, so
+// whether the path is ignored is decided without it.)
+func (e *Engine) encIgnoredError(encPath string) error {
+	out, _ := e.Repo.Git("check-ignore", "-v", "--no-index", "--", encPath)
+	src := strings.SplitN(strings.TrimSpace(string(out)), "\t", 2)[0]
+	hint := ""
+	if strings.HasSuffix(src, "/") {
+		hint = " (a rule for a whole directory cannot be undone that way: write `dir/*` instead of `dir/`)"
+	}
+	return refuse("%s would be ignored by git (%s); add a line `!*.enc` after that rule, or narrow it%s", encPath, src, hint)
 }
 
 // declare adds undeclared paths to a git-enc block.
@@ -226,6 +232,21 @@ func (e *Engine) declare(paths []string, keyName string, out *[]string) (bool, e
 	}
 	if len(todo) == 0 {
 		return false, nil
+	}
+	// Before writing .gitignore: an .enc git would ignore could never be
+	// committed, and add would stop halfway.
+	var encs []string
+	for _, p := range todo {
+		encs = append(encs, p+".enc")
+	}
+	ignored, err := e.checkIgnore(encs)
+	if err != nil {
+		return false, err
+	}
+	for _, p := range encs {
+		if ignored[p] {
+			return false, e.encIgnoredError(p)
+		}
 	}
 	if len(e.Problems) > 0 {
 		for _, p := range e.Problems {
@@ -439,14 +460,13 @@ func (e *Engine) restoreEnc(s *Secret) error {
 }
 
 // replace overwrites the plaintext with body, first saving an encrypted
-// backup when the old copy is not something git history already holds.
+// backup. Every replaced copy is backed up, even one git history already holds:
+// that is what the state says, and a backup costs nothing if the state was
+// ever wrong. Only a copy that held edits (keep) is mentioned.
 func (e *Engine) replace(s *Secret, body []byte, msg string, keep bool) (string, error) {
-	backup := ""
-	if keep {
-		var err error
-		if backup, err = e.backup(s); err != nil {
-			return "", err
-		}
+	backup, err := e.backup(s)
+	if err != nil {
+		return "", err
 	}
 	if err := fsx.WriteWorktree(e.Repo.Root, s.Path, body, 0o600); err != nil {
 		return "", err
@@ -455,7 +475,7 @@ func (e *Engine) replace(s *Secret, body []byte, msg string, keep bool) (string,
 		os.Remove(e.Repo.Abs(s.Incoming))
 	}
 	s.entry.Seen = ""
-	if backup != "" && msg != "" {
+	if keep && backup != "" && msg != "" {
 		msg += " (your old copy: `git enc cat " + backup + "`)"
 	}
 	return msg, nil
@@ -479,7 +499,28 @@ func (e *Engine) backup(s *Secret) (string, error) {
 	if err := fsx.WriteAtomic(file, sealed, 0o600); err != nil {
 		return "", err
 	}
+	pruneBackups(dir)
 	return e.display(file), nil
+}
+
+// Backups older than backupAge are removed, except the newest keepBackups.
+const (
+	backupAge   = 90 * 24 * time.Hour
+	keepBackups = 20
+)
+
+// pruneBackups deletes old backups (their names start with the time).
+func pruneBackups(dir string) {
+	entries, err := os.ReadDir(dir)
+	if err != nil || len(entries) <= keepBackups {
+		return
+	}
+	cutoff := time.Now().Add(-backupAge).UTC().Format("20060102T150405")
+	for _, en := range entries[:len(entries)-keepBackups] { // sorted by name: oldest first
+		if n := en.Name(); len(n) > 15 && n[:15] < cutoff {
+			os.Remove(filepath.Join(dir, n))
+		}
+	}
 }
 
 // display renders a file under the worktree relative to the current

@@ -1289,6 +1289,59 @@ func TestGuards(t *testing.T) {
 		}
 	})
 
+	t.Run("the cache can be deleted at any time", func(t *testing.T) {
+		_, a, b := team(t)
+		a.Write(".env", "API_KEY=two\n")
+		a.Enc("add", ".env")
+		os.Remove(filepath.Join(a.Dir, ".git", "git-enc", "cache"))
+		a.commitPush("two")
+		b.Git("pull", "-q")
+		b.Enc("update")
+		b.Write(".env", "API_KEY=three\n")
+		b.Enc("add", ".env")
+		b.commitPush("three")
+		a.Git("pull", "-q")
+		a.expectState(".env", "outdated")
+	})
+
+	t.Run("every replaced copy is backed up", func(t *testing.T) {
+		_, a, b := team(t)
+		b.Write(".env", "API_KEY=two\n")
+		b.Enc("add", ".env")
+		b.commitPush("two")
+		a.Git("pull", "-q")
+		a.Enc("update")
+		if m, _ := filepath.Glob(filepath.Join(a.Dir, ".git", "git-enc", "backup", "*")); len(m) != 1 {
+			t.Fatalf("backups: %v", m)
+		}
+	})
+
+	t.Run("a refused add leaves nothing half done", func(t *testing.T) {
+		w := newWorld(t)
+		a := w.clone("alice")
+		a.Enc("key", "new", "team")
+		a.Write(".gitignore", ".env*\n")
+		a.Write(".env", "K=1\n")
+		a.Git("add", "-f", ".gitignore", ".env")
+		a.Git("commit", "-q", "-m", "plaintext, as found")
+		if r := a.TryEnc("add", "--key", "team", ".env"); r.Code != 3 {
+			t.Fatalf("add: exit %d\n%s", r.Code, r.Err)
+		}
+		if out := a.Git("status", "--porcelain"); out != "" {
+			t.Fatalf("a refused add changed things:\n%s", out)
+		}
+	})
+
+	t.Run("status does not wait for another git-enc", func(t *testing.T) {
+		_, a, _ := team(t)
+		os.WriteFile(filepath.Join(a.Dir, ".git", "git-enc", "lock"), []byte("1\n"), 0o600)
+		start := time.Now()
+		a.expectState(".env", "clean")
+		if d := time.Since(start); d > 3*time.Second {
+			t.Fatalf("status waited %v for the lock", d)
+		}
+	})
+
 	t.Run("plaintext is not pushed", func(t *testing.T) {
 		_, a, _ := team(t)
 		a.Git("add", "-f", ".env")
