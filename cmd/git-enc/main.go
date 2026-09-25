@@ -130,6 +130,8 @@ func run(args []string) int {
 		code, err = cmdRekey(rest)
 	case "hook":
 		return cmdHook(rest)
+	case "merge-driver":
+		return cmdMergeDriver(rest)
 	default:
 		fmt.Fprintf(os.Stderr, "git enc: unknown command %q (see `git enc help`)\n", cmd)
 		return exitUsage
@@ -657,6 +659,25 @@ func cmdCat(args []string) (int, error) {
 	}
 	os.Stdout.Write(body)
 	return exitOK, nil
+}
+
+// cmdMergeDriver is git's merge driver for .enc files (`git enc init` sets
+// it up): exit 0 with the merged file written over ours, or 1 for a
+// conflict, which `git enc merge` then resolves in the plaintext.
+func cmdMergeDriver(args []string) int {
+	if len(args) != 4 {
+		fmt.Fprintln(os.Stderr, "usage: git enc merge-driver BASE OURS THEIRS PATH")
+		return exitUsage
+	}
+	ok, err := engine.MergeDriver(".", args[0], args[1], args[2], args[3])
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "git-enc:", err)
+	}
+	if !ok || err != nil {
+		fmt.Fprintf(os.Stderr, "git-enc: could not merge %s; resolve it with `git enc merge %s`\n", args[3], strings.TrimSuffix(args[3], ".enc"))
+		return exitError
+	}
+	return exitOK
 }
 
 // cmdHook runs a git hook. Hooks read without taking git-enc's lock, so
