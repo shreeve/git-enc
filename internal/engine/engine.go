@@ -891,7 +891,7 @@ func (e *Engine) classify() error {
 					s.set(NoKey, fmt.Sprintf("key %s cannot decrypt %s (it was encrypted with a different key)", s.Block.Key, s.EncPath), "")
 				}
 			} else {
-				s.set(Corrupt, s.EncPath+": "+err.Error(), "")
+				s.set(Corrupt, s.EncPath+" cannot be decrypted ("+err.Error()+"); if you changed it, restore git's copy with `git restore "+s.EncPath+"`", "")
 			}
 			continue
 		}
@@ -1011,6 +1011,9 @@ func (e *Engine) noKeyMessage(b *spec.Block) string {
 		}
 		if k := e.Keys.ByName(b.Key); k != nil {
 			return fmt.Sprintf("your key %q is %s, but this repo uses %s %s", b.Key, k.Fingerprint, b.Key, b.Fingerprint)
+		}
+		if os.Getenv("GIT_ENC_KEY") != "" {
+			return fmt.Sprintf("you don't have key %s (%s): no key in $GIT_ENC_KEY has that fingerprint", b.Key, b.Fingerprint)
 		}
 		return fmt.Sprintf("you don't have key %s (%s)", b.Key, b.Fingerprint)
 	}

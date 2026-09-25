@@ -96,7 +96,8 @@ git enc init                    # hooks, and decrypts every secret you have a ke
 | `git enc rekey OLD NEW` | Move to a new key and re-encrypt (see [Changing keys](#changing-keys)) |
 
 Exit codes: 0 success, 1 error, 2 usage, 3 needs attention (a secret must be
-added, updated or merged first), 4 a key is missing.
+added, updated or merged first), 4 a key is missing. `git enc update` exits 3
+when it leaves a conflict for you, so `git enc update && ./app` stops there.
 
 Put `git enc check` in the script that starts your app (`bin/dev`, a
 `predev` script, a Makefile), and a forgotten `git enc update` or
@@ -124,14 +125,18 @@ Put `git enc check` in the script that starts your app (`bin/dev`, a
   version into your edits, or, if the same lines changed, keeps your copy and
   writes the committed version to `F.incoming`. The secret stays in
   `conflict` until you merge `F.incoming` into `F` and run `git enc add F`
-  (`git enc add --all` skips it); `git enc update --discard F` takes the
-  committed version instead.
+  (`git enc add` refuses while `F` is unchanged since, and `--all` skips
+  it); `git enc update --discard F` takes the committed version instead.
 - **`add` never overwrites someone else's change.** It refuses an
   `outdated`, `conflict` or `diverged` secret (or a file still holding
   conflict markers) unless you pass `--force`. Deleting a `.enc` file does not
   get around this: git-enc compares against git's copy.
 - **Anything replaced is backed up first**, encrypted, under
-  `.git/git-enc/backup/`. `git enc cat FILE` prints one.
+  `.git/git-enc/backup/` (kept 90 days, and always the latest 20).
+  `git enc cat FILE` prints one; `git enc cat FILE > .env` puts it back.
+- **History reads in plain text.** In a clone set up with `git enc init`,
+  `git log -p .env.enc` and `git diff` show each version of a secret
+  decrypted (to turn that off: `git config --unset diff.git-enc.textconv`).
 - **Git merges and rebases are handled.** After `git enc init`, git merges
   secrets by their plaintext, like any text file: edits to different lines
   merge inside `git pull`. Edits to the same line stop as a conflict, and
@@ -252,7 +257,22 @@ A key is one line of text, stored in `~/.config/git-enc/keys/NAME`
 standard input, never from the command line, which would leave it in
 your shell history.
 
+**Keep a copy of every key in a password manager.** The key file is the
+only way to decrypt your secrets: if it is lost with your laptop and nobody
+else has it, the secrets in git are gone for good.
+
 For CI, put one or more keys in `GIT_ENC_KEY` and run `git enc update`.
+
+### A new machine
+
+You need the repository and the key; nothing else lives only on the old
+machine except edits you had not added.
+
+```sh
+git clone …
+git enc key add team            # paste it from the password manager
+git enc init                    # hooks, merging, and every secret decrypted
+```
 
 ### Changing keys
 

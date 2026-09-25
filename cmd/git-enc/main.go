@@ -16,6 +16,7 @@ import (
 	"syscall"
 
 	"github.com/shreeve/git-enc/internal/engine"
+	"github.com/shreeve/git-enc/internal/envelope"
 	"github.com/shreeve/git-enc/internal/fsx"
 	"github.com/shreeve/git-enc/internal/keys"
 )
@@ -58,15 +59,19 @@ an encrypted F.enc beside each one):
 
 Everyday commands:
     git enc status             which secrets you edited, which changed in git
-                               (--json for tools, --exit-code as for check)
+      --json                     for tools; --exit-code: exit as check does
     git enc add FILE… | --all  encrypt your edits and stage the .enc files
+      --key NAME                 declare new files in the block for key NAME
+      --force                    overwrite a newer committed version
     git enc update [FILE…]     bring your copies up to date (never loses edits)
+      --discard FILE…            take the committed version (yours is backed up)
     git enc diff [FILE…]       show your edits against the committed version
     git enc merge [FILE…]      resolve a git merge/rebase conflict on a secret
 
 Setup:
-    git enc init               set up this clone (hooks; decrypts what you're missing)
-    git enc key new NAME       create a key; share it once, out of band
+    git enc init               set up this clone: hooks, merging of secrets,
+                               and the plaintext of every secret you can read
+    git enc key new NAME       create a key; save it in a password manager
     git enc key add NAME       import a key someone shared (reads stdin)
     git enc key show NAME      print a key (e.g. | pbcopy)
     git enc key list           your keys
@@ -77,7 +82,7 @@ Setup:
 
 Other:
     git enc check              quiet check for scripts: exit 3 if anything needs doing
-    git enc cat FILE           decrypt a .enc or a backup to stdout
+    git enc cat FILE           decrypt a .enc or a backup to stdout (- for stdin)
     git enc version [--json]
 
 Exit codes: 0 ok, 1 error, 2 usage, 3 needs attention, 4 missing key.
@@ -136,6 +141,10 @@ func run(args []string) int {
 		fmt.Fprintf(os.Stderr, "git enc: unknown command %q (see `git enc help`)\n", cmd)
 		return exitUsage
 	}
+	if errors.As(err, &helpRequested{}) {
+		fmt.Print(usage)
+		return exitOK
+	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "git enc:", err)
 		return errorCode(err)
@@ -170,11 +179,18 @@ func flags(name string) *flag.FlagSet {
 }
 
 func parse(fs *flag.FlagSet, args []string) error {
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(args); errors.Is(err, flag.ErrHelp) {
+		return helpRequested{}
+	} else if err != nil {
 		return usageError{err.Error()}
 	}
 	return nil
 }
+
+// helpRequested is -h or --help after a command: print the usage, exit 0.
+type helpRequested struct{}
+
+func (helpRequested) Error() string { return "help requested" }
 
 func isTTY(f *os.File) bool {
 	fi, err := f.Stat()
@@ -295,11 +311,17 @@ func printStatus(e *engine.Engine) {
 		return
 	}
 	for _, k := range r.Keys {
-		if k.Available {
+		switch why, skipped := e.Keys.Skipped[k.Name]; {
+		case k.Available:
 			fmt.Printf("key %s (%s): ok\n", k.Name, k.Fingerprint)
-		} else {
+		case skipped:
+			fmt.Printf("key %s (%s): unusable — %s\n", k.Name, orUnknown(k.Fingerprint), why)
+		default:
 			fmt.Printf("key %s (%s): not on this machine — `git enc key add %s`\n", k.Name, orUnknown(k.Fingerprint), k.Name)
 		}
+	}
+	if e.SetupNeeded() {
+		fmt.Println("this clone is not set up: run `git enc init` (hooks that keep plaintext out of commits, and merging of secrets)")
 	}
 	group := func(title string, states ...engine.Kind) {
 		var rows []engine.ReportSecret
@@ -322,10 +344,19 @@ func printStatus(e *engine.Engine) {
 			fmt.Println(line)
 		}
 	}
-	var staged []string
+	var staged, unstaged []string
 	for _, s := range r.Secrets {
-		if s.State == engine.Clean && s.Staged {
+		switch {
+		case s.State == engine.Clean && s.EncDirty:
+			unstaged = append(unstaged, s.Path)
+		case s.State == engine.Clean && s.Staged:
 			staged = append(staged, s.EncPath)
+		}
+	}
+	if len(unstaged) > 0 {
+		fmt.Println("\nEncrypted but not staged (git enc add <file>):")
+		for _, p := range unstaged {
+			fmt.Println("  " + p)
 		}
 	}
 	if len(staged) > 0 {
@@ -397,7 +428,7 @@ func cmdCheck(args []string) (code int, err error) {
 		}
 	}
 	if len(e.Problems) > 0 {
-		parts = append(parts, fmt.Sprintf("%d problem(s) in .gitignore", len(e.Problems)))
+		parts = append(parts, fmt.Sprintf("%d problem(s)", len(e.Problems)))
 	}
 	fmt.Fprintf(os.Stderr, "git-enc: secrets need attention (%s) — run `git enc status`\n", strings.Join(parts, ", "))
 	return code, nil
@@ -453,17 +484,36 @@ func cmdUpdate(args []string) (code int, err error) {
 	}
 	out, err := e.Update(paths, engine.UpdateOptions{Discard: *discard})
 	printLines(out)
+	for _, w := range e.Keys.Warnings {
+		fmt.Fprintln(os.Stderr, "warning:", w)
+	}
 	if err != nil {
 		return errorCode(err), err
 	}
-	if len(e.Reminders()) > 0 {
-		for _, s := range e.Secrets {
-			if s.Kind == engine.NoKey {
-				return exitNoKey, nil
-			}
+	// A script running `git enc update && ./app` must not go on with a
+	// secret still in conflict, or missing for want of a key.
+	code = exitOK
+	for _, s := range e.Secrets {
+		if len(paths) > 0 && !contains(paths, s.Path) {
+			continue
+		}
+		switch s.Kind {
+		case engine.NoKey:
+			return exitNoKey, nil
+		case engine.Conflict, engine.Diverged, engine.Merging, engine.Corrupt:
+			code = exitAttention
 		}
 	}
-	return exitOK, nil
+	return code, nil
+}
+
+func contains(list []string, s string) bool {
+	for _, x := range list {
+		if x == s {
+			return true
+		}
+	}
+	return false
 }
 
 func cmdDiff(args []string) (code int, err error) {
@@ -568,7 +618,8 @@ func cmdKey(args []string) (int, error) {
 			return exitError, err
 		}
 		fmt.Printf("created key %s (fingerprint %s) in %s\n", k.Name, k.Fingerprint, k.File)
-		fmt.Printf("share it once with your team, through a password manager:\n  git enc key show %s | pbcopy\n", k.Name)
+		fmt.Printf("That file is the only copy: without it nobody can decrypt these secrets.\n")
+		fmt.Printf("Save it in your password manager now, and share it the same way:\n  git enc key show %s | pbcopy\n", k.Name)
 	case "add":
 		if isTTY(os.Stdin) {
 			fmt.Fprintf(os.Stderr, "paste key %s, then press Ctrl-D:\n", name)
@@ -578,7 +629,7 @@ func cmdKey(args []string) (int, error) {
 			return exitError, err
 		}
 		fmt.Printf("saved key %s (fingerprint %s) in %s\n", k.Name, k.Fingerprint, k.File)
-		fmt.Println("next, in a repository that uses it: git enc update")
+		fmt.Println("next, in each repository that uses it: git enc init")
 	case "show":
 		st, err := keys.Load()
 		if err != nil {
@@ -646,14 +697,37 @@ func cmdRekey(args []string) (code int, err error) {
 }
 
 func cmdCat(args []string) (int, error) {
+	// --textconv: git's diff driver (`git enc init` sets it up), so that
+	// `git log -p` shows secrets in plain text. It never fails: a version
+	// this user cannot read shows as a note instead of breaking the diff.
+	textconv := len(args) == 2 && args[0] == "--textconv"
+	if textconv {
+		args = args[1:]
+	}
 	if len(args) != 1 {
 		return exitUsage, usageError{"usage: git enc cat FILE"}
 	}
-	data, err := os.ReadFile(args[0])
-	if err != nil {
-		return exitError, err
+	var data []byte
+	var err error
+	if args[0] == "-" {
+		data, err = io.ReadAll(os.Stdin)
+	} else {
+		data, err = os.ReadFile(args[0])
 	}
-	body, err := engine.Cat(data)
+	if err == nil && !envelope.IsSealed(data) {
+		err = fmt.Errorf("%s is not an encrypted file", args[0])
+		if _, e2 := os.Stat(args[0] + ".enc"); e2 == nil {
+			err = fmt.Errorf("%s is not an encrypted file (did you mean %s.enc?)", args[0], args[0])
+		}
+	}
+	var body []byte
+	if err == nil {
+		body, err = engine.Cat(data)
+	}
+	if err != nil && textconv {
+		fmt.Printf("(git-enc: cannot show this version: %v)\n", err)
+		return exitOK, nil
+	}
 	if err != nil {
 		return exitError, err
 	}
