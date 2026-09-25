@@ -93,7 +93,7 @@ type Repo struct {
 
 // openGitPaths are the --git-path names asked for at Open, in the same
 // rev-parse call, since nearly every command needs them.
-var openGitPaths = []string{"git-enc", "info/exclude", "hooks"}
+var openGitPaths = []string{"git-enc", "info/exclude", "hooks", "info/attributes", "MERGE_HEAD"}
 
 // Open finds the repository containing dir. One `git rev-parse` answers
 // everything a command needs to know about the repository's layout: git

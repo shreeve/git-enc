@@ -181,8 +181,11 @@ func TestDiscardKeepsBackup(t *testing.T) {
 }
 
 // Red-team critical 2: a git merge conflict on .enc must not look clean.
+// Bob's clone has no merge driver (as before `git enc init` set one up),
+// so git leaves the conflict to `git enc merge`.
 func TestGitMergeConflict(t *testing.T) {
 	_, a, b := team(t)
+	os.Remove(filepath.Join(b.Dir, ".git", "info", "attributes"))
 	for _, p := range []*Person{a, b} {
 		p.Write(".env", "A=1\nM=0\nB=1\n")
 	}
@@ -1293,5 +1296,66 @@ func TestGuards(t *testing.T) {
 		if r := a.TryGit("push", "-q", "origin", "HEAD"); r.Code == 0 || !strings.Contains(r.Err, "refusing to push") {
 			t.Fatalf("plaintext pushed (exit %d):\n%s", r.Code, r.Err)
 		}
+	})
+}
+
+// With the merge driver `git enc init` sets up, git merges secrets by their
+// plaintext: edits to different lines merge inside `git pull`, as any file.
+// A merge committed with one side's .enc taken whole, when both sides
+// changed it (GitHub Desktop's "use mine"), is refused.
+func TestMergeDriver(t *testing.T) {
+	setup := func(t *testing.T) (*Person, *Person) {
+		_, a, b := team(t)
+		for _, p := range []*Person{a, b} {
+			p.Write(".env", "A=1\nM=0\nB=1\n")
+		}
+		a.Enc("add", ".env")
+		a.commitPush("base")
+		b.Git("pull", "-q")
+		b.Enc("update", "--discard", ".env")
+		return a, b
+	}
+
+	for _, how := range []string{"--no-rebase", "--rebase"} {
+		t.Run("different lines merge in git pull "+how, func(t *testing.T) {
+			a, b := setup(t)
+			a.Write(".env", "A=9\nM=0\nB=1\n")
+			a.Enc("add", ".env")
+			a.commitPush("A=9")
+			b.Write(".env", "A=1\nM=0\nB=2\n")
+			b.Enc("add", ".env")
+			b.Git("commit", "-q", "-m", "B=2")
+			b.Git("pull", "-q", how)
+			b.Enc("update")
+			if got := b.Read(".env"); got != "A=9\nM=0\nB=2\n" {
+				t.Fatalf("merged .env = %q", got)
+			}
+			b.expectState(".env", "clean")
+		})
+	}
+
+	t.Run("taking one side whole is refused", func(t *testing.T) {
+		a, b := setup(t)
+		a.Write(".env", "A=1\nM=alice\nB=1\n")
+		a.Enc("add", ".env")
+		a.commitPush("alice")
+		b.Write(".env", "A=1\nM=bob\nB=1\n")
+		b.Enc("add", ".env")
+		b.Git("commit", "-q", "-m", "bob")
+		if r := b.TryGit("pull", "-q", "--no-rebase"); r.Code == 0 {
+			t.Fatal("expected a conflict on the same line")
+		}
+		b.Git("checkout", "--ours", ".env.enc")
+		b.Git("add", ".env.enc")
+		r := b.TryGit("commit", "-q", "--no-edit")
+		if r.Code == 0 || !strings.Contains(r.Err, "refusing to commit the merge") {
+			t.Fatalf("one-sided merge committed (exit %d):\n%s", r.Code, r.Err)
+		}
+		b.Git("checkout", "-m", "--", ".env.enc")
+		b.Enc("merge")
+		b.Write(".env", "A=1\nM=both\nB=1\n")
+		b.Enc("add", ".env")
+		b.Git("commit", "-q", "--no-edit")
+		b.expectState(".env", "clean")
 	})
 }

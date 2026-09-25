@@ -132,9 +132,13 @@ Put `git enc check` in the script that starts your app (`bin/dev`, a
   get around this: git-enc compares against git's copy.
 - **Anything replaced is backed up first**, encrypted, under
   `.git/git-enc/backup/`. `git enc cat FILE` prints one.
-- **Git merges and rebases are handled.** `git enc merge` decrypts both
-  sides and merges the plaintext, so a teammate's change is never dropped
-  in favor of yours.
+- **Git merges and rebases are handled.** After `git enc init`, git merges
+  secrets by their plaintext, like any text file: edits to different lines
+  merge inside `git pull`. Edits to the same line stop as a conflict, and
+  `git enc merge` writes both sides into your plaintext with the usual
+  conflict markers. A merge that takes one side's `.enc` whole while both
+  sides changed the secret (a "use mine" button) is refused at commit, so a
+  teammate's change is never dropped in favor of yours.
 
 git-enc remembers, per clone (in `.git/git-enc/`), which committed version
 each of your copies came from. That is how it tells *your edit* from *an
@@ -144,7 +148,9 @@ tell, it says so (`diverged`) instead of guessing.
 
 ### Hooks
 
-`git enc init` installs hooks that **never encrypt or decrypt anything**:
+`git enc init` sets up git's merging of `.enc` files (in the clone's own
+config: a repository cannot turn on a merge program for you) and installs
+hooks that **never encrypt or decrypt anything**:
 
 - **pre-commit** refuses to commit a secret's plaintext (for example after
   `git add -f .env`, or a plaintext copied over `.env.enc`), and reminds
@@ -173,6 +179,10 @@ there. Two things to know:
 - Desktop cannot see the plaintext (it's ignored), so an edited secret does
   not show up in Desktop until you run `git enc add`.
 - Desktop shows `.enc` changes as binary files.
+- Pulls merge secrets like other files. If both of you changed the same
+  line, Desktop shows a conflict on the `.enc` and offers only "use mine"
+  or "use theirs"; either would drop a change, so the commit is refused
+  with the two commands that merge both sides instead.
 
 A GitHub Desktop integration (a Secrets panel with Encrypt and Update
 buttons) is planned.

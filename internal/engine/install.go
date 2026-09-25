@@ -235,6 +235,10 @@ func (e *Engine) Init(binary string) ([]string, error) {
 	if err != nil {
 		return out, err
 	}
+	if err := e.installDriver(binary); err != nil {
+		return out, err
+	}
+	out = append(out, "set up merging: git merges secrets by their plaintext in this clone")
 	if e.HooksInstalled() {
 		out = append(out, "installed hooks (they remind; they never encrypt or decrypt)")
 	}

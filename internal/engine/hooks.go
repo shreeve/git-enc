@@ -36,6 +36,14 @@ func (e *Engine) Hook(name string) ([]string, bool) {
 			out = append(out, fmt.Sprintf("git-enc: refusing to delete %s.enc: %s is still declared in .gitignore\n  to stop encrypting it, remove its line from .gitignore too; to keep it: git enc update %s", p, p, p))
 			stop = true
 		}
+		oneSided, err := e.stagedOneSided()
+		if err != nil {
+			return []string{"git-enc: cannot check this commit for plaintext secrets: " + err.Error()}, true
+		}
+		for _, p := range oneSided {
+			out = append(out, oneSidedMessage(p))
+			stop = true
+		}
 		unsealed, err := e.stagedUnsealed()
 		if err != nil {
 			return []string{"git-enc: cannot check this commit for plaintext secrets: " + err.Error()}, true

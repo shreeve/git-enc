@@ -105,6 +105,10 @@ muts = [
   "if b, _, err := e.Spec.Match(p); b != nil || err != nil || e.managed(p) || (name != p && e.managed(name)) || isTemp(p) {",
   "if b, _, err := e.Spec.Match(p); false && (b != nil || err != nil || e.managed(p) || (name != p && e.managed(name)) || isTemp(p)) {",
   "TestGuards/plaintext_is_not"),
+ ("merge driver never merges", "internal/engine/driver.go",
+  "if err != nil || conflicts > 0 {", "if err != nil || conflicts >= 0 {", "TestMergeDriver/different"),
+ ("one-sided merge resolution committed", "internal/engine/driver.go",
+  "bad = append(bad, s.Path)", "_ = s", "TestMergeDriver/taking"),
 ]
 stale = [name for name, f, old, _, _ in muts if old not in open(f).read()]
 if stale:
