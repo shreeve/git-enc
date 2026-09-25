@@ -1581,3 +1581,75 @@ func TestRollbackWarned(t *testing.T) {
 		t.Fatalf("rollback not warned:\n%s", out)
 	}
 }
+
+// With enc.autoUpdate, a pull brings secrets up to date by itself: only
+// what git history already holds, never an edit.
+func TestAutoUpdate(t *testing.T) {
+	_, a, b := team(t)
+	a.Git("config", "enc.autoUpdate", "true")
+	b.Write(".env", "API_KEY=two\n")
+	b.Enc("add", ".env")
+	b.commitPush("two")
+	if out := a.Git("pull"); !strings.Contains(out, "updated .env") {
+		t.Fatalf("pull did not update:\n%s", out)
+	}
+	if got := a.Read(".env"); got != "API_KEY=two\n" {
+		t.Fatalf(".env = %q", got)
+	}
+	a.expectState(".env", "clean")
+
+	// An edit is never touched, even one git-enc could merge with the new
+	// version (different lines): the pull only reminds.
+	b.Write(".env", "A=1\nM=0\nB=1\n")
+	b.Enc("add", ".env")
+	b.commitPush("three lines")
+	a.Git("pull", "-q")
+	a.Write(".env", "A=1\nM=0\nB=mine\n")
+	b.Write(".env", "A=theirs\nM=0\nB=1\n")
+	b.Enc("add", ".env")
+	b.commitPush("theirs")
+	if out := a.Git("pull"); !strings.Contains(out, "run `git enc update`") {
+		t.Fatalf("no reminder for a conflict:\n%s", out)
+	}
+	if got := a.Read(".env"); got != "A=1\nM=0\nB=mine\n" {
+		t.Fatalf("the edit was touched: .env = %q", got)
+	}
+}
+
+// When GitHub Desktop runs git, the reminders it would never show become
+// what it does: a refused commit, and secrets updated on pull.
+func TestGitHubDesktop(t *testing.T) {
+	_, a, b := team(t)
+	out, err := exec.Command("git", "--exec-path").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Desktop's own git lives inside the app, and says so in GIT_EXEC_PATH.
+	app := filepath.Join(t.TempDir(), "GitHub Desktop.app", "Contents", "Resources", "app", "git", "libexec")
+	os.MkdirAll(app, 0o755)
+	core := filepath.Join(app, "git-core")
+	if err := os.Symlink(strings.TrimSpace(string(out)), core); err != nil {
+		t.Skip("no symlinks here")
+	}
+	a.Env = []string{"GIT_EXEC_PATH=" + core}
+
+	a.Write(".env", "API_KEY=edited\n")
+	a.Write("app.txt", "change\n")
+	a.Git("add", "app.txt")
+	r := a.TryGit("commit", "-q", "-m", "app")
+	if r.Code == 0 || !strings.Contains(r.Err, "GitHub Desktop cannot see a secret") {
+		t.Fatalf("commit with an unencrypted edit (exit %d):\n%s", r.Code, r.Err)
+	}
+	a.Git("config", "enc.requireAdded", "false")
+	a.Git("commit", "-q", "-m", "app")
+	a.Git("config", "--unset", "enc.requireAdded")
+	a.Enc("update", "--discard", ".env")
+
+	b.Write(".env", "API_KEY=two\n")
+	b.Enc("add", ".env")
+	b.commitPush("two")
+	a.Git("pull", "-q", "--no-rebase", "--no-edit")
+	if got := a.Read(".env"); got != "API_KEY=two\n" {
+		t.Fatalf("pull under Desktop did not update: .env = %q", got)
+	}
+}

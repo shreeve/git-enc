@@ -638,12 +638,7 @@ func (e *Engine) Merge(paths []string) ([]string, error) {
 	if len(targets) == 0 {
 		return []string{"no secret has a merge conflict"}, nil
 	}
-	rebasing := false
-	for _, d := range []string{"rebase-merge", "rebase-apply"} {
-		if p, err := e.Repo.GitPath(d); err == nil && gitx.Exists(p) {
-			rebasing = true
-		}
-	}
+	rebasing := e.Repo.Rebasing()
 	var out []string
 	for _, s := range targets {
 		if s.plainErr != nil {

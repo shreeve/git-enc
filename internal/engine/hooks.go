@@ -2,7 +2,9 @@ package engine
 
 import (
 	"fmt"
+	"os"
 	"path"
+	"path/filepath"
 	"strings"
 
 	"github.com/shreeve/git-enc/internal/envelope"
@@ -53,21 +55,69 @@ func (e *Engine) Hook(name string) ([]string, bool) {
 			stop = true
 		}
 	}
-	require := e.Repo.ConfigBool("enc.requireAdded", false)
+	// GitHub Desktop shows a hook's output only when the hook fails, so
+	// there a reminder would go unseen: it refuses instead, unless
+	// enc.requireAdded says otherwise.
+	desktop := RunByDesktop()
+	require := e.Repo.ConfigBool("enc.requireAdded", desktop)
 	switch name {
 	case "pre-commit", "pre-push":
 		if pending := e.kinds(New, Modified); len(pending) > 0 {
-			verb := "not added"
-			if require {
+			msg := fmt.Sprintf("git-enc: %s edited but not added: %s — run `git enc add`", plural(len(pending), "secret"), list(pending))
+			switch {
+			case require && desktop:
 				stop = true
-				verb = "not added (enc.requireAdded is set)"
+				msg = fmt.Sprintf("git-enc: %s edited but not encrypted yet: %s\n  GitHub Desktop cannot see a secret until you run `git enc add` in a terminal (to commit without it: git config enc.requireAdded false)", plural(len(pending), "secret"), list(pending))
+			case require:
+				stop = true
+				msg = strings.Replace(msg, "not added", "not added (enc.requireAdded is set)", 1)
 			}
-			out = append(out, fmt.Sprintf("git-enc: %s edited but %s: %s — run `git enc add`", plural(len(pending), "secret"), verb, list(pending)))
+			out = append(out, msg)
 		}
 	default:
 		out = append(out, e.Reminders()...)
 	}
 	return out, stop
+}
+
+// RunByDesktop reports whether GitHub Desktop is running git: it runs its
+// own git with GIT_EXEC_PATH inside the app, which hooks inherit.
+func RunByDesktop() bool {
+	p := strings.ToLower(filepath.ToSlash(os.Getenv("GIT_EXEC_PATH")))
+	for _, s := range []string{"github desktop", "githubdesktop", "github-desktop"} {
+		if strings.Contains(p, s) {
+			return true
+		}
+	}
+	return false
+}
+
+// AutoUpdate brings secrets up to date after git changed them (a pull, a
+// checkout), when enc.autoUpdate is on, or GitHub Desktop is running git
+// and it is not off: only a copy git history already holds, or one that is
+// missing. Anything with your edits in it is left to `git enc update`, and
+// the reminders say so.
+func (e *Engine) AutoUpdate() ([]string, bool) {
+	if e.lock == nil || !e.Repo.ConfigBool("enc.autoUpdate", RunByDesktop()) {
+		return nil, false
+	}
+	var paths []string
+	for _, s := range e.Secrets {
+		if s.Kind == Outdated || s.Kind == Missing {
+			paths = append(paths, s.Path)
+		}
+	}
+	if len(paths) == 0 {
+		return nil, true
+	}
+	out, err := e.Update(paths, UpdateOptions{})
+	for i, l := range out {
+		out[i] = "git-enc: " + l
+	}
+	if err != nil {
+		out = append(out, "git-enc: "+err.Error())
+	}
+	return out, true
 }
 
 // OutgoingPlaintext lists secret plaintext in the commits a push would send.
