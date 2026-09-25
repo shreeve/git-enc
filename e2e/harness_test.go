@@ -107,6 +107,7 @@ type Person struct {
 	Name string
 	Dir  string
 	home string
+	Env  []string // extra environment for every command
 }
 
 // clone makes a new person with a clone of origin.
@@ -140,7 +141,7 @@ func (p *Person) exec(stdin string, name string, args ...string) Result {
 func (p *Person) execIn(dir, stdin string, name string, args ...string) Result {
 	cmd := exec.Command(name, args...)
 	cmd.Dir = dir
-	cmd.Env = p.w.env(p.home)
+	cmd.Env = append(p.w.env(p.home), p.Env...)
 	if stdin != "" {
 		cmd.Stdin = strings.NewReader(stdin)
 	}

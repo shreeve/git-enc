@@ -80,6 +80,15 @@ muts = [
   "targets = appendNew(targets, s)", "targets = append(targets, s)", "TestUsability/a_file_named"),
  ("git's error replaced by a guess", "internal/gitx/gitx.go",
   "return nil, errors.New(strings.TrimPrefix(strings.TrimSpace(ge.Stderr), \"fatal: \"))", "return nil, errors.New(\"not in a git repository\")", "TestUsability/git's_own"),
+ ("pathspec variables passed to git", "internal/gitx/gitx.go",
+  "case \"GIT_LITERAL_PATHSPECS\", \"GIT_GLOB_PATHSPECS\", \"GIT_NOGLOB_PATHSPECS\", \"GIT_ICASE_PATHSPECS\":", "case \"none\":",
+  "TestGitEnvironment/pathspec"),
+ ("restoring a .enc runs the user's hook", "internal/engine/actions.go",
+  "if err := fsx.WriteWorktree(e.Repo.Root, s.EncPath, data, 0o644); err != nil {",
+  "if _, err := e.Repo.Git(\"restore\", \"--source=HEAD\", \"--staged\", \"--worktree\", \"--\", \":(literal)\"+s.EncPath); err != nil || data == nil {",
+  "TestGitEnvironment/restoring"),
+ ("post-checkout scans when no secret changed", "cmd/git-enc/main.go",
+  "if args[0] == \"post-checkout\" && len(args) == 4", "if false && args[0] == \"post-checkout\" && len(args) == 4", "TestGitEnvironment/a_checkout"),
 ]
 stale = [name for name, f, old, _, _ in muts if old not in open(f).read()]
 if stale:

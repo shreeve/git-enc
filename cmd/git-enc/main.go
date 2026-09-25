@@ -667,6 +667,9 @@ func cmdHook(args []string) int {
 	if len(args) == 0 {
 		return exitOK
 	}
+	if args[0] == "post-checkout" && len(args) == 4 && args[3] == "1" && engine.SameSecrets(".", args[1], args[2]) {
+		return exitOK // a branch switch that changed no .enc and no .gitignore: nothing to remind
+	}
 	e, err := engine.OpenReadOnly(".")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "git-enc:", err)

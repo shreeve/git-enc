@@ -1076,3 +1076,49 @@ func TestInterruptCleansUp(t *testing.T) {
 		t.Errorf("plaintext left behind in %v", m)
 	}
 }
+
+// git-enc keeps working whatever environment git hands it, and does not set
+// off the user's own hooks.
+func TestGitEnvironment(t *testing.T) {
+	t.Run("pathspec variables", func(t *testing.T) {
+		for _, v := range []string{"GIT_LITERAL_PATHSPECS=1", "GIT_ICASE_PATHSPECS=1"} {
+			_, a, _ := team(t)
+			a.Env = []string{v}
+			a.expectState(".env", "clean")
+			a.Git("add", "-f", ".env")
+			if r := a.TryGit("commit", "-q", "-m", "oops"); r.Code == 0 || !strings.Contains(r.Err, "refusing to commit the plaintext secret .env") {
+				t.Fatalf("%s: pre-commit (exit %d):\n%s", v, r.Code, r.Err)
+			}
+		}
+	})
+
+	t.Run("restoring a .enc runs no hook", func(t *testing.T) {
+		_, a, _ := team(t)
+		log := filepath.Join(a.Dir, "hook.log")
+		hook := filepath.Join(a.Dir, ".git", "hooks", "post-checkout.git-enc-chained")
+		os.WriteFile(hook, []byte("#!/bin/sh\necho ran >> '"+filepath.ToSlash(log)+"'\n"), 0o755)
+		a.Git("rm", "-q", ".env.enc")
+		a.Enc("update", ".env")
+		if !a.Exists(".env.enc") || strings.Contains(a.Git("status", "--porcelain"), ".env.enc") {
+			t.Fatalf(".env.enc not restored:\n%s", a.Git("status", "--porcelain"))
+		}
+		if _, err := os.Stat(log); err == nil {
+			t.Fatal("git-enc set off the post-checkout hook")
+		}
+	})
+
+	t.Run("a checkout that changes no secret is quiet", func(t *testing.T) {
+		_, a, _ := team(t)
+		os.Remove(filepath.Join(a.Dir, ".env")) // now missing: reminders would say so
+		if out := a.Git("checkout", "-b", "other"); strings.Contains(out, "git-enc") {
+			t.Fatalf("reminded on a checkout that changed no secret:\n%s", out)
+		}
+		a.Enc("update")
+		a.Write(".env", "API_KEY=other\n")
+		a.Enc("add", ".env")
+		a.Git("commit", "-q", "-m", "other")
+		if out := a.Git("checkout", "main"); !strings.Contains(out, "run `git enc update`") {
+			t.Fatalf("no reminder when the checkout changed a secret:\n%s", out)
+		}
+	})
+}
