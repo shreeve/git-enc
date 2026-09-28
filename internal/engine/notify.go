@@ -2,6 +2,7 @@ package engine
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"runtime"
 	"strings"
@@ -87,6 +88,9 @@ $x.LoadXml('<toast><visual><binding template="ToastGeneric"><text>` + x(title) +
 		}
 		cmd = exec.Command("notify-send", title, body)
 	}
+	// Not in the repository: on Windows a notifier still running there would
+	// keep the folder from being moved or deleted.
+	cmd.Dir = os.TempDir()
 	if cmd.Start() == nil {
 		cmd.Process.Release()
 	}
