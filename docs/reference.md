@@ -147,6 +147,7 @@ have it (`available`), `skipped` when you don't hold it on purpose
 | `not-ignored` | git does not ignore a secret's plaintext (a `!` rule), so it could be committed |
 | `enc-ignored` | git ignores a `.enc`, so it can't be committed |
 | `tracked-plaintext` | git tracks a secret's plaintext |
+| `one-sided-merge` | a merge in progress takes one side's `.enc` whole while both sides changed the secret |
 | `unsafe-path` | a path git-enc refuses: through a symlink, inside `.git`, or unreadable |
 
 ## The `.enc` format

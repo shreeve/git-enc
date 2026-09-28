@@ -958,6 +958,9 @@ func TestRekeyMovedSecret(t *testing.T) {
 	}
 	a.Enc("rekey", "team", "ops", ".env")
 	a.expectState(".env", "clean")
+	if out := a.Git("diff", "--name-only"); out != "" {
+		t.Fatalf("rekey left the moved line unstaged:\n%s", out)
+	}
 	if !strings.Contains(a.Read(".gitignore"), "# git-enc: ops ") {
 		t.Fatalf("no fingerprint on the ops block:\n%s", a.Read(".gitignore"))
 	}
@@ -1410,6 +1413,9 @@ func TestMergeDriver(t *testing.T) {
 		}
 		b.Git("checkout", "--ours", ".env.enc")
 		b.Git("add", ".env.enc")
+		if st := b.Status(); len(st.Problems) == 0 || st.Problems[0].Code != "one-sided-merge" {
+			t.Fatalf("status before the commit: %+v", st.Problems)
+		}
 		r := b.TryGit("commit", "-q", "--no-edit")
 		if r.Code == 0 || !strings.Contains(r.Err, "refusing to commit the merge") {
 			t.Fatalf("one-sided merge committed (exit %d):\n%s", r.Code, r.Err)
@@ -1426,8 +1432,10 @@ func TestMergeDriver(t *testing.T) {
 // Messages say what to do next, and history reads in plain text.
 func TestMessages(t *testing.T) {
 	w, a, b := team(t)
-	if r := a.TryEnc("add", "--help"); r.Code != 0 || !strings.Contains(r.Out, "--discard") {
-		t.Fatalf("add --help: exit %d\n%s%s", r.Code, r.Out, r.Err)
+	for _, args := range [][]string{{"add", "--help"}, {"key", "new", "--help"}, {"cat", "--help"}, {"verify", "-h"}} {
+		if r := a.TryEnc(args...); r.Code != 0 || !strings.Contains(r.Out, "--discard") {
+			t.Fatalf("%v: exit %d\n%s%s", args, r.Code, r.Out, r.Err)
+		}
 	}
 
 	// A clone that has not run init is told so; after init it is not.
@@ -1807,5 +1815,23 @@ func TestDesktopNotify(t *testing.T) {
 	a.Git("add", "app.txt")
 	if r := a.TryGit("commit", "-q", "-m", "app"); r.Code != 0 || !strings.Contains(r.Err, "edited but not added") {
 		t.Fatalf("commit with enc.desktop false (exit %d):\n%s", r.Code, r.Err)
+	}
+}
+
+// Moving a secret into a block that already has its fingerprint: the moved
+// line is staged with the re-encrypted file, so one commit carries both.
+func TestRekeyMovedSecretStagesGitignore(t *testing.T) {
+	_, a, _ := team(t)
+	a.Enc("key", "new", "ops")
+	fp := ""
+	for _, l := range strings.Split(a.Enc("key", "list"), "\n") {
+		if f := strings.Fields(l); len(f) > 1 && f[0] == "ops" {
+			fp = f[1]
+		}
+	}
+	a.Write(".gitignore", strings.Replace(a.Read(".gitignore"), "/.env\n", "", 1)+"\n# git-enc: ops "+fp+"\n/.env\n# git-enc: end\n")
+	a.Enc("rekey", "team", "ops", ".env")
+	if out := a.Git("diff", "--name-only"); out != "" {
+		t.Fatalf("rekey left the moved line unstaged:\n%s", out)
 	}
 }

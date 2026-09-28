@@ -123,6 +123,12 @@ func (e *Engine) Rekey(from, to string, paths []string) ([]string, error) {
 		}
 		out = append(out, fmt.Sprintf("re-encrypted %s with key %s (staged)", j.s.EncPath, newKey.Name))
 	}
+	if len(paths) > 0 {
+		// The line moved by hand belongs in the same commit.
+		if _, err := e.Repo.Git("add", "--", ".gitignore"); err != nil {
+			return out, err
+		}
+	}
 	if len(jobs) == 0 {
 		out = append(out, "nothing to re-encrypt")
 	} else {

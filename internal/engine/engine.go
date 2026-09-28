@@ -280,6 +280,17 @@ func (e *Engine) Scan() error {
 		}
 	}
 	e.Secrets = kept
+	// A merge resolved by taking one side's .enc whole (a "use mine"
+	// button): say so now, not only when the commit is refused.
+	oneSided, err := e.stagedOneSided()
+	if err != nil {
+		return err
+	}
+	for _, p := range oneSided {
+		e.Problems = append(e.Problems, Problem{Code: "one-sided-merge", Path: p,
+			Message: "the merge keeps one side's " + p + ".enc whole, dropping the other side's change",
+			Action:  "git checkout -m -- " + p + ".enc && git enc merge " + p})
+	}
 	return nil
 }
 

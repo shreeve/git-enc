@@ -42,6 +42,8 @@
 
 ### Documentation
 
+- The README is rewritten: a shorter path from install to everyday use,
+  settings in one place, and a banner (`assets/gitenc-social.png`).
 - A reference ([docs/reference.md](docs/reference.md)): every file git-enc
   writes, settings, environment variables, exit codes, and the JSON for
   tools; a troubleshooting section; `SECURITY.md` for reporting problems

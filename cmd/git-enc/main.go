@@ -81,7 +81,8 @@ Setup:
                                the block for key NEW
 
 Other:
-    git enc check              quiet check for scripts: exit 3 if anything needs doing
+    git enc check              quiet check for scripts: exit 3 if anything needs
+                               doing, 4 if only a key is missing
     git enc verify [RANGE]     for CI, no key needed: no plaintext committed (in
                                RANGE's commits too, e.g. origin/main..HEAD), every
                                .enc encrypted, .gitignore sound; exit 3 if not
@@ -109,6 +110,15 @@ func run(args []string) int {
 		return exitUsage
 	}
 	cmd, rest := args[0], args[1:]
+	// -h or --help after any command (but not as a file for cat to read).
+	if cmd != "hook" && cmd != "merge-driver" && cmd != "cat" || len(rest) == 1 && cmd == "cat" {
+		for _, a := range rest {
+			if a == "-h" || a == "--help" {
+				fmt.Print(usage)
+				return exitOK
+			}
+		}
+	}
 	var err error
 	code := exitOK
 	switch cmd {
@@ -865,6 +875,9 @@ func cmdMergeDriver(args []string) int {
 func cmdHook(args []string) int {
 	if len(args) == 0 {
 		return exitOK
+	}
+	if args[0] == "post-checkout" && len(args) == 4 && args[3] == "0" {
+		return exitOK // files checked out (`git checkout -- F`), not a branch switch
 	}
 	if args[0] == "post-checkout" && len(args) == 4 && args[3] == "1" && engine.SameSecrets(".", args[1], args[2]) {
 		return exitOK // a branch switch that changed no .enc and no .gitignore: nothing to remind

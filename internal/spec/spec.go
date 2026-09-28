@@ -148,7 +148,7 @@ func compile(raw string, fold bool) (*Pattern, string) {
 	case strings.HasPrefix(pat, "!"):
 		return nil, "negated patterns (`!`) are not allowed in a git-enc block"
 	case strings.HasSuffix(pat, "/"):
-		return nil, fmt.Sprintf("directory pattern %q would also hide the .enc files; list files instead (e.g. %q)", pat, strings.TrimSuffix(pat, "/")+"/*")
+		return nil, fmt.Sprintf("directory pattern %q would also hide the .enc files; name the files or their extension instead (e.g. %q)", pat, strings.TrimSuffix(pat, "/")+"/*.yml")
 	case strings.Contains(pat, "[:"):
 		return nil, "character classes like `[[:digit:]]` are not supported in a git-enc block; use `[0-9]` or list the paths"
 	case strings.Contains(pat, "**"):

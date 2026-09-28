@@ -240,7 +240,7 @@ func (e *Engine) Init(binary string) ([]string, error) {
 	}
 	out = append(out, "set up merging: git merges secrets by their plaintext in this clone")
 	if e.HooksInstalled() {
-		out = append(out, "installed hooks (they remind; they never encrypt or decrypt)")
+		out = append(out, "installed hooks (they keep plaintext out of commits, and remind you what to run)")
 	}
 	var missing []string
 	for _, s := range e.Secrets {
@@ -258,7 +258,7 @@ func (e *Engine) Init(binary string) ([]string, error) {
 	skip := e.SkippedKeys()
 	for _, b := range e.Spec.Blocks {
 		if e.blockKey(b) == nil && !skip[b.Key] {
-			out = append(out, fmt.Sprintf("%s: import it with `git enc key add %s` (paste the key, then Ctrl-D), then run `git enc update`", e.noKeyMessage(b), b.Key))
+			out = append(out, fmt.Sprintf("%s: import it with `git enc key add %s` (paste the key, then Ctrl-D), then run `git enc init` again", e.noKeyMessage(b), b.Key))
 		}
 	}
 	if len(e.Spec.Blocks) == 0 {

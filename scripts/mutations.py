@@ -92,7 +92,7 @@ muts = [
   "if _, err := e.Repo.Git(\"restore\", \"--source=HEAD\", \"--staged\", \"--worktree\", \"--\", \":(literal)\"+s.EncPath); err != nil || data == nil {",
   "TestGitEnvironment/restoring"),
  ("post-checkout scans when no secret changed", "cmd/git-enc/main.go",
-  "if args[0] == \"post-checkout\" && len(args) == 4", "if false && args[0] == \"post-checkout\" && len(args) == 4", "TestGitEnvironment/a_checkout"),
+  "if args[0] == \"post-checkout\" && len(args) == 4 && args[3] == \"1\"", "if false && args[0] == \"post-checkout\" && len(args) == 4 && args[3] == \"1\"", "TestGitEnvironment/a_checkout"),
  ("unreadable plaintext treated as missing", "internal/engine/engine.go",
   "\t\tcase s.plainErr != nil:", "\t\tcase false:", "TestGuards/an_unreadable"),
  ("deleted .enc shown clean", "internal/engine/engine.go",
@@ -158,6 +158,10 @@ muts = [
   "\t\tif !done[n.Key] {", "\t\tif true {", "TestDesktopNotify"),
  ("enc.desktop false ignored", "internal/engine/hooks.go",
   "return RunByDesktop() && e.Repo.ConfigBool(\"enc.desktop\", true)", "return RunByDesktop()", "TestDesktopNotify"),
+ ("rekey leaves the moved line unstaged", "internal/engine/rekey.go",
+  "\tif len(paths) > 0 {\n\t\t// The line moved by hand", "\tif false {\n\t\t// The line moved by hand", "TestRekeyMovedSecretStagesGitignore"),
+ ("status silent on a one-sided merge", "internal/engine/engine.go",
+  "\tfor _, p := range oneSided {\n\t\te.Problems", "\tfor _, p := range oneSided[:0] {\n\t\te.Problems", "TestMergeDriver/taking"),
 ]
 stale = [name for name, f, old, _, _ in muts if old not in open(f).read()]
 if stale:
