@@ -141,6 +141,9 @@ muts = [
   "if os.Getenv(\"GITHUB_DESKTOP\") != \"\" {", "if false {", "TestGitHubDesktop/hooks_run_by_Desktop$"),
  ("state saved in the middle of a rebase", "internal/engine/engine.go",
   "case try && !repo.Rebasing():", "case try:", "TestMergeDriver/different_lines_merge_in_git_pull_--rebase"),
+ ("Desktop never told post-merge needs you", "cmd/git-enc/main.go",
+  "if attention && engine.RunByDesktop() && (name == \"post-merge\" || name == \"post-rewrite\") {",
+  "if false && attention && engine.RunByDesktop() && (name == \"post-merge\" || name == \"post-rewrite\") {", "TestDesktopPostMergeSignals"),
 ]
 stale = [name for name, f, old, _, _ in muts if old not in open(f).read()]
 if stale:

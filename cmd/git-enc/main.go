@@ -795,11 +795,20 @@ func postHook(name string) int {
 	} else {
 		out, _ = e.Hook(name)
 	}
+	attention := len(e.Reminders()) > 0
 	for _, l := range out {
 		fmt.Fprintln(os.Stderr, l)
+		attention = attention || strings.Contains(l, "warning:")
 	}
 	if err := e.Close(); err != nil {
 		fmt.Fprintln(os.Stderr, "git-enc:", err)
+	}
+	// GitHub Desktop shows a hook's output only when the hook fails, so
+	// there post-merge and post-rewrite fail when something needs you (git
+	// ignores their exit code). Not post-checkout: its exit code becomes
+	// the checkout's, and a branch switch that happened would look failed.
+	if attention && engine.RunByDesktop() && (name == "post-merge" || name == "post-rewrite") {
+		return exitError
 	}
 	return exitOK
 }
