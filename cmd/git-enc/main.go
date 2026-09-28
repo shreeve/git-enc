@@ -779,6 +779,26 @@ func cmdCat(args []string) (int, error) {
 	return exitOK, nil
 }
 
+// desktopHook is the pre-commit or pre-push hook under GitHub Desktop: one
+// list of secrets, shown in Desktop's dialog when it matters (see
+// engine.DesktopReport).
+func desktopHook(e *engine.Engine, name string) int {
+	var refs []byte
+	if name == "pre-push" {
+		refs, _ = io.ReadAll(io.LimitReader(os.Stdin, 1<<20))
+	}
+	text, fail, err := e.DesktopReport(name, string(refs))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "git-enc: cannot check this %s for plaintext secrets: %v\n", strings.TrimPrefix(name, "pre-"), err)
+		return exitError
+	}
+	fmt.Fprint(os.Stderr, text)
+	if fail {
+		return exitError
+	}
+	return exitOK
+}
+
 // postHook runs after git changed the worktree. It never stops anything.
 // With automatic updates on (enc.autoUpdate, or under GitHub Desktop) it
 // takes the lock if it is free and brings secrets up to date; otherwise,
@@ -794,6 +814,10 @@ func postHook(name string) int {
 		out = append(out, e.Reminders()...)
 	} else {
 		out, _ = e.Hook(name)
+	}
+	if engine.RunByDesktop() {
+		// Desktop never shows this hook's output: keep it for the next list.
+		e.RecordForDesktop(map[string]string{"post-merge": "merge", "post-rewrite": "rebase", "post-checkout": "branch switch"}[name])
 	}
 	attention := len(e.Reminders()) > 0
 	for _, l := range out {
@@ -854,6 +878,9 @@ func cmdHook(args []string) int {
 			return exitError
 		}
 		return exitOK
+	}
+	if engine.RunByDesktop() && (args[0] == "pre-commit" || args[0] == "pre-push") {
+		return desktopHook(e, args[0])
 	}
 	out, stop := e.Hook(args[0])
 	if args[0] == "pre-push" {

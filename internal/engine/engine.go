@@ -122,6 +122,8 @@ type Engine struct {
 	baseDir    string                 // per-worktree git-enc dir
 	ignored    map[string]bool        // paths git ignores, from this scan's one check-ignore
 	shared     map[*spec.Block]string // blocks whose key another block uses too
+	updated    []*Secret              // brought up to date by Update in this run
+	rolledBack []*Secret              // of those, ones taken back to an earlier value
 }
 
 // Open opens the repository at dir, takes the git-enc lock, and scans it.

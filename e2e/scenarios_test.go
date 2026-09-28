@@ -1648,10 +1648,14 @@ func desktopFlow(t *testing.T, env []string) {
 	a.Write("app.txt", "change\n")
 	a.Git("add", "app.txt")
 	r := a.TryGit("commit", "-q", "-m", "app")
-	if r.Code == 0 || !strings.Contains(r.Err, "GitHub Desktop cannot see a secret") {
+	if r.Code == 0 || !strings.Contains(r.Err, "Desktop can't see it") {
 		t.Fatalf("commit with an unencrypted edit (exit %d):\n%s", r.Code, r.Err)
 	}
+	// With enc.requireAdded off, it says so once, then lets commits through.
 	a.Git("config", "enc.requireAdded", "false")
+	if r := a.TryGit("commit", "-q", "-m", "app"); r.Code == 0 || !strings.Contains(r.Err, "won't stop you for these again") {
+		t.Fatalf("first commit with requireAdded off (exit %d):\n%s", r.Code, r.Err)
+	}
 	a.Git("commit", "-q", "-m", "app")
 	a.Git("config", "--unset", "enc.requireAdded")
 	a.Enc("update", "--discard", ".env")
@@ -1690,4 +1694,71 @@ func TestDesktopPostMergeSignals(t *testing.T) {
 	if r := a.Binary("hook", "post-merge"); r.Code != 0 {
 		t.Fatalf("post-merge under Desktop with nothing to do: exit %d\n%s", r.Code, r.Err)
 	}
+}
+
+// Under GitHub Desktop the commit hook shows one list: ✘ blocks every time,
+// ! needs you and shows once, ✔ is what git-enc did since the last list
+// (things Desktop never shows after a pull).
+func TestDesktopReport(t *testing.T) {
+	w, a, b := team(t)
+	a.Env = []string{"GITHUB_DESKTOP=1"}
+	a.Write("config.yml", "C=1\n")
+	a.Enc("add", "config.yml")
+	a.commitPush("config")
+	b.Git("pull", "-q")
+	b.Enc("update")
+
+	// A conflict from a pull, an unencrypted edit, and plaintext staged.
+	b.Write("config.yml", "C=theirs\n")
+	b.Enc("add", "config.yml")
+	b.commitPush("theirs")
+	a.Write("config.yml", "C=mine\n")
+	a.Git("pull", "-q")
+	a.Write(".env", "API_KEY=edited\n")
+	a.Write("app.txt", "x\n")
+	a.Git("add", "app.txt")
+	a.Git("add", "-f", ".env")
+	r := a.TryGit("commit", "-q", "-m", "app")
+	for _, want := range []string{"this commit is stopped", "✘", ".env", "!", "config.yml", "you edited it, and it changed in git too"} {
+		if r.Code == 0 || !strings.Contains(r.Err, want) {
+			t.Fatalf("list (exit %d) lacks %q:\n%s", r.Code, want, r.Err)
+		}
+	}
+	// Fix the ✘ items: the ! was shown, so the commit goes ahead, and says
+	// something still needs you rather than "all current".
+	a.Git("rm", "-q", "--cached", ".env")
+	a.Enc("add", ".env")
+	r = a.TryGit("commit", "-q", "-m", "app")
+	if r.Code != 0 || !strings.Contains(r.Err, "1 secret still needs you") {
+		t.Fatalf("second commit (exit %d):\n%s", r.Code, r.Err)
+	}
+	a.Enc("update", "--discard", "config.yml")
+	a.Git("push", "-q")
+
+	// A pull updates a secret: the next list says so.
+	b.Git("pull", "-q")
+	b.Enc("update")
+	b.Write(".env", "API_KEY=three\n")
+	b.Enc("add", ".env")
+	b.commitPush("three")
+	a.Git("pull", "-q")
+	a.Write("app.txt", "y\n")
+	a.Git("add", "app.txt")
+	if r := a.TryGit("commit", "-q", "-m", "app"); r.Code != 0 || !strings.Contains(r.Err, "✔") || !strings.Contains(r.Err, ".env  updated after the merge") {
+		t.Fatalf("commit after an updating pull (exit %d):\n%s", r.Code, r.Err)
+	}
+	a.Git("push", "-q")
+
+	// A rollback from someone without the key: shown once, at the next commit.
+	m := w.clone("mallory")
+	m.Git("checkout", "HEAD~2", "--", ".env.enc")
+	m.Git("commit", "-q", "-m", "innocent")
+	m.Git("push", "-q", "origin", "HEAD")
+	a.Git("pull", "-q")
+	a.Write("app.txt", "z\n")
+	a.Git("add", "app.txt")
+	if r := a.TryGit("commit", "-q", "-m", "app"); r.Code == 0 || !strings.Contains(r.Err, "earlier value") {
+		t.Fatalf("rollback not shown (exit %d):\n%s", r.Code, r.Err)
+	}
+	a.Git("commit", "-q", "-m", "app")
 }

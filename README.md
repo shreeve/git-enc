@@ -158,7 +158,8 @@ tell, it says so (`diverged`) instead of guessing.
 
 `git enc init` sets up git's merging of `.enc` files (in the clone's own
 config: a repository cannot turn on a merge program for you) and installs
-hooks that **never encrypt or decrypt anything**:
+hooks that **never encrypt anything, and decrypt only if you ask them to**
+(`enc.autoUpdate`, below, or under GitHub Desktop):
 
 - **pre-commit** refuses to commit a secret's plaintext (for example after
   `git add -f .env`, or a plaintext copied over `.env.enc`), and reminds
@@ -221,18 +222,40 @@ git-enc works with GitHub Desktop as it is, once `git enc init` has run in
 the clone. After `git enc add`, the `.enc` file appears in Desktop's
 changes like any other file, and you commit it there.
 
-Desktop shows a hook's output only when the hook fails, so git-enc's
-reminders would go unseen there. When Desktop runs git (git-enc can tell),
-the hooks do instead what the reminders ask for:
+Desktop shows a hook's output only when the hook fails, in a dialog with
+**Ignore and Continue** and **Abort**, and never shows what the hooks
+after a pull or a branch switch say. So when Desktop runs git (git-enc can
+tell), git-enc works with that:
 
-- **Pulls and branch switches update your secrets** (as
-  `enc.autoUpdate` does), except ones with your edits in them. When one
-  needs you after a pull (a conflict, a missing key), the post-merge hook
-  reports a failure, so a Desktop that shows such failures shows why.
-- **A commit is refused while a secret is edited but not encrypted**, with
-  the reason in Desktop's error dialog: Desktop cannot see the plaintext
-  (it is ignored), so run `git enc add` in a terminal first. To commit
-  without it: `git config enc.requireAdded false`.
+- **Pulls and branch switches update your secrets** (as `enc.autoUpdate`
+  does), except ones with your edits in them.
+- **Committing and pushing show one list of your secrets** in that dialog,
+  when there is something to say:
+
+  ```
+  git-enc: this commit is stopped
+   ✘ .env        edited, but not encrypted: Desktop can't see it until you add it
+                 in a terminal: git enc add .env
+   ! config.yml  you edited it, and it changed in git too
+                 in a terminal: git enc update config.yml
+   ✔ db.env      updated after the merge
+  ```
+
+  - **✘ stops the commit, every time**: a secret edited but not encrypted
+    (Desktop can't see the plaintext; to commit without it:
+    `git config enc.requireAdded false`), plaintext staged, a `.enc` that is
+    not encrypted, a merge that drops one side's change.
+  - **! needs you, and is shown once**: a conflict, a missing key, a secret
+    a pull took back to an earlier value. After that, Ignore and Continue
+    is not needed again for it.
+  - **✔ is what git-enc did** since the last list, such as secrets a pull
+    updated.
+
+  With nothing to say, the commit goes ahead; Desktop's commit progress
+  view (the terminal button while it commits) shows
+  `✔ git-enc: 3 secrets, all encrypted and current`.
+- Should a future Desktop show the output of hooks after a pull, the
+  post-merge hook already reports a failure when a secret needs you.
 
 Also:
 
