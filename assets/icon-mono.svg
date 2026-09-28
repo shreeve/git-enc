@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="t">
+  <title id="t">git-enc</title>
+  <!-- One color (currentColor), for menu bars, trays and favicons: the
+       branch is cut out of the lock, so any background shows through. -->
+  <defs>
+    <mask id="cut">
+      <rect width="64" height="64" fill="#fff"/>
+      <g stroke="#000" stroke-width="3.6" stroke-linecap="round" fill="none">
+        <path d="M27 35 V48"/>
+        <path d="M38 37.5 C38 42.5 33 43.8 27.5 45.5"/>
+      </g>
+      <circle cx="27" cy="34" r="3.6" fill="#000"/>
+      <circle cx="27" cy="49" r="3.6" fill="#000"/>
+      <circle cx="38" cy="36.5" r="3.8" fill="#000"/>
+    </mask>
+  </defs>
+  <path d="M22 29 V21 a10 10 0 0 1 20 0 V29" fill="none" stroke="currentColor" stroke-width="5.5" stroke-linecap="round"/>
+  <rect x="13" y="27" width="38" height="30" rx="6" fill="currentColor" mask="url(#cut)"/>
+</svg>
