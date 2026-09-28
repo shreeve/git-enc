@@ -58,7 +58,7 @@ func (e *Engine) Hook(name string) ([]string, bool) {
 	// GitHub Desktop shows a hook's output only when the hook fails, so
 	// there a reminder would go unseen: it refuses instead, unless
 	// enc.requireAdded says otherwise.
-	desktop := RunByDesktop()
+	desktop := e.Desktop()
 	require := e.Repo.ConfigBool("enc.requireAdded", desktop)
 	switch name {
 	case "pre-commit", "pre-push":
@@ -97,13 +97,20 @@ func RunByDesktop() bool {
 	return false
 }
 
+// Desktop reports whether git-enc works the GitHub Desktop way here:
+// Desktop is running the hooks, and enc.desktop is not false (which makes
+// them behave as they do in a terminal).
+func (e *Engine) Desktop() bool {
+	return RunByDesktop() && e.Repo.ConfigBool("enc.desktop", true)
+}
+
 // AutoUpdate brings secrets up to date after git changed them (a pull, a
 // checkout), when enc.autoUpdate is on, or GitHub Desktop is running git
 // and it is not off: only a copy git history already holds, or one that is
 // missing. Anything with your edits in it is left to `git enc update`, and
 // the reminders say so.
 func (e *Engine) AutoUpdate() ([]string, bool) {
-	if e.lock == nil || !e.Repo.ConfigBool("enc.autoUpdate", RunByDesktop()) {
+	if e.lock == nil || !e.Repo.ConfigBool("enc.autoUpdate", e.Desktop()) {
 		return nil, false
 	}
 	var paths []string

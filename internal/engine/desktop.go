@@ -40,6 +40,8 @@ type note struct {
 type desktopFile struct {
 	Pending []note   `json:"pending"` // from hooks after a pull or checkout
 	Shown   []string `json:"shown"`   // keys of "!" notes already shown
+	// Notified: keys of problems a system notification already told of.
+	Notified []string `json:"notified,omitempty"`
 }
 
 const (
@@ -63,6 +65,9 @@ func (e *Engine) loadDesktop() *desktopFile {
 func (e *Engine) saveDesktop(d *desktopFile) {
 	if len(d.Shown) > 200 {
 		d.Shown = d.Shown[len(d.Shown)-200:]
+	}
+	if len(d.Notified) > 200 {
+		d.Notified = d.Notified[len(d.Notified)-200:]
 	}
 	if data, err := json.MarshalIndent(d, "", "  "); err == nil && os.MkdirAll(e.baseDir, 0o700) == nil {
 		_ = fsx.WriteAtomic(e.desktopPath(), append(data, '\n'), 0o600)
