@@ -1619,19 +1619,30 @@ func TestAutoUpdate(t *testing.T) {
 // When GitHub Desktop runs git, the reminders it would never show become
 // what it does: a refused commit, and secrets updated on pull.
 func TestGitHubDesktop(t *testing.T) {
+	t.Run("hooks run by Desktop", func(t *testing.T) {
+		// Desktop 3.5 and later run hooks themselves, with GITHUB_DESKTOP=1.
+		desktopFlow(t, []string{"GITHUB_DESKTOP=1"})
+	})
+	t.Run("hooks run by Desktop's git", func(t *testing.T) {
+		// With that turned off, Desktop's own git runs them, and its
+		// GIT_EXEC_PATH is inside the app.
+		out, err := exec.Command("git", "--exec-path").Output()
+		if err != nil {
+			t.Fatal(err)
+		}
+		app := filepath.Join(t.TempDir(), "GitHub Desktop.app", "Contents", "Resources", "app", "git", "libexec")
+		os.MkdirAll(app, 0o755)
+		core := filepath.Join(app, "git-core")
+		if err := os.Symlink(strings.TrimSpace(string(out)), core); err != nil {
+			t.Skip("no symlinks here")
+		}
+		desktopFlow(t, []string{"GIT_EXEC_PATH=" + core})
+	})
+}
+
+func desktopFlow(t *testing.T, env []string) {
 	_, a, b := team(t)
-	out, err := exec.Command("git", "--exec-path").Output()
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Desktop's own git lives inside the app, and says so in GIT_EXEC_PATH.
-	app := filepath.Join(t.TempDir(), "GitHub Desktop.app", "Contents", "Resources", "app", "git", "libexec")
-	os.MkdirAll(app, 0o755)
-	core := filepath.Join(app, "git-core")
-	if err := os.Symlink(strings.TrimSpace(string(out)), core); err != nil {
-		t.Skip("no symlinks here")
-	}
-	a.Env = []string{"GIT_EXEC_PATH=" + core}
+	a.Env = env
 
 	a.Write(".env", "API_KEY=edited\n")
 	a.Write("app.txt", "change\n")

@@ -136,7 +136,9 @@ muts = [
  ("automatic update touches an edit", "internal/engine/hooks.go",
   "if s.Kind == Outdated || s.Kind == Missing {", "if s.Kind != Clean {", "TestAutoUpdate"),
  ("GitHub Desktop not recognized", "internal/engine/hooks.go",
-  "\t\tif strings.Contains(p, s) {", "\t\tif false && strings.Contains(p, s) {", "TestGitHubDesktop"),
+  "\t\tif strings.Contains(p, s) {", "\t\tif false && strings.Contains(p, s) {", "TestGitHubDesktop/hooks_run_by_Desktop's_git"),
+ ("GITHUB_DESKTOP not recognized", "internal/engine/hooks.go",
+  "if os.Getenv(\"GITHUB_DESKTOP\") != \"\" {", "if false {", "TestGitHubDesktop/hooks_run_by_Desktop$"),
  ("state saved in the middle of a rebase", "internal/engine/engine.go",
   "case try && !repo.Rebasing():", "case try:", "TestMergeDriver/different_lines_merge_in_git_pull_--rebase"),
 ]

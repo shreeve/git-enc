@@ -80,9 +80,14 @@ func (e *Engine) Hook(name string) ([]string, bool) {
 	return out, stop
 }
 
-// RunByDesktop reports whether GitHub Desktop is running git: it runs its
-// own git with GIT_EXEC_PATH inside the app, which hooks inherit.
+// RunByDesktop reports whether GitHub Desktop is running git's hooks. Desktop
+// runs them itself and says so with GITHUB_DESKTOP=1; with that turned off
+// in its settings, git runs them, and Desktop's own git has GIT_EXEC_PATH
+// inside the app.
 func RunByDesktop() bool {
+	if os.Getenv("GITHUB_DESKTOP") != "" {
+		return true
+	}
 	p := strings.ToLower(filepath.ToSlash(os.Getenv("GIT_EXEC_PATH")))
 	for _, s := range []string{"github desktop", "githubdesktop", "github-desktop"} {
 		if strings.Contains(p, s) {
