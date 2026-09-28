@@ -26,8 +26,10 @@
 - `git config enc.autoUpdate true`: pulls and checkouts bring secrets up
   to date by themselves (never one with your edits in it).
 - Under GitHub Desktop, which hides hook reminders, the hooks act instead:
-  pulls update secrets, and a commit with a secret edited but not
-  encrypted is refused with the reason.
+  pulls update secrets, and committing or pushing shows one list of your
+  secrets in Desktop's dialog: ✘ stops the commit (an edit not encrypted,
+  plaintext staged…), ! needs you and is shown once (a conflict, a missing
+  key, a rollback), ✔ says what a pull updated.
 - `git config enc.skipKeys ops` quiets the blocks of a key you don't hold
   on purpose (another group's secrets, or a CI job's).
 - `git enc update` warns when a secret would go back to an earlier value,

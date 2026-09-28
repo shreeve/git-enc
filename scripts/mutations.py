@@ -144,6 +144,14 @@ muts = [
  ("Desktop never told post-merge needs you", "cmd/git-enc/main.go",
   "if attention && engine.RunByDesktop() && (name == \"post-merge\" || name == \"post-rewrite\") {",
   "if false && attention && engine.RunByDesktop() && (name == \"post-merge\" || name == \"post-rewrite\") {", "TestDesktopPostMergeSignals"),
+ ("Desktop shows a ! every time", "internal/engine/desktop.go",
+  "case n.Mark == markNeed && shown[n.Key]:", "case false && n.Mark == markNeed && shown[n.Key]:", "TestDesktopReport"),
+ ("Desktop told all is current while something needs you", "internal/engine/desktop.go",
+  "if len(notes) == 0 && seen > 0 {", "if false && len(notes) == 0 && seen > 0 {", "TestDesktopReport"),
+ ("pull results never reach Desktop", "cmd/git-enc/main.go",
+  "\tif engine.RunByDesktop() {\n\t\t// Desktop never shows", "\tif false {\n\t\t// Desktop never shows", "TestDesktopReport"),
+ ("rollback never reaches Desktop", "internal/engine/actions.go",
+  "e.rolledBack = append(e.rolledBack, s)", "_ = s", "TestDesktopReport"),
 ]
 stale = [name for name, f, old, _, _ in muts if old not in open(f).read()]
 if stale:
