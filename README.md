@@ -326,7 +326,9 @@ git, git-enc works with that:
 - **Pulls and branch switches update your secrets**, except ones with your
   edits in them.
 - **A pull that leaves a secret needing you is told at once**, in a system
-  notification, once per problem.
+  notification, once per problem. (On macOS these come from Script Editor;
+  to see them pop up rather than wait in Notification Center, set Script
+  Editor to **Banners** in System Settings → Notifications.)
 - **Committing and pushing show one list of your secrets** in that dialog,
   when there is something to say:
 

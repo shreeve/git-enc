@@ -62,8 +62,10 @@ func (e *Engine) Add(paths []string, opt AddOptions) ([]string, error) {
 		out = append(out, "nothing to add")
 		return out, nil
 	}
-	if err := e.ensureAttributes(); err != nil {
+	if msg, err := e.ensureAttributes(); err != nil {
 		return out, err
+	} else if msg != "" {
+		out = append(out, msg)
 	}
 	explicit := map[*Secret]bool{}
 	for _, p := range paths {

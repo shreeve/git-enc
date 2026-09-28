@@ -162,6 +162,8 @@ muts = [
   "\tif len(paths) > 0 {\n\t\t// The line moved by hand", "\tif false {\n\t\t// The line moved by hand", "TestRekeyMovedSecretStagesGitignore"),
  ("status silent on a one-sided merge", "internal/engine/engine.go",
   "\tfor _, p := range oneSided {\n\t\te.Problems", "\tfor _, p := range oneSided[:0] {\n\t\te.Problems", "TestMergeDriver/taking"),
+ ("init changes .gitattributes silently", "internal/engine/install.go",
+  "\t\tif msg != \"\" {\n\t\t\tout = append(out, msg)", "\t\tif false {\n\t\t\tout = append(out, msg)", "TestAttributesChangeIsSaid"),
 ]
 stale = [name for name, f, old, _, _ in muts if old not in open(f).read()]
 if stale:

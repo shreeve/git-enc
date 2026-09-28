@@ -1835,3 +1835,24 @@ func TestRekeyMovedSecretStagesGitignore(t *testing.T) {
 		t.Fatalf("rekey left the moved line unstaged:\n%s", out)
 	}
 }
+
+// When git-enc changes .gitattributes, it says so: the change is staged,
+// and it needs committing, or a teammate's pull can collide with it.
+func TestAttributesChangeIsSaid(t *testing.T) {
+	w := newWorld(t)
+	a := w.clone("alice")
+	a.Enc("key", "new", "team")
+	a.Write(".gitignore", "# git-enc: team\n.env\n# git-enc: end\n")
+	a.Git("add", ".gitignore")
+	a.Git("commit", "-q", "-m", "declare .env by hand")
+	if out := a.Enc("init"); !strings.Contains(out, "to .gitattributes (staged; commit it") {
+		t.Fatalf("init did not say it changed .gitattributes:\n%s", out)
+	}
+	if out := a.Git("status", "--porcelain"); !strings.Contains(out, "A  .gitattributes") {
+		t.Fatalf("status:\n%s", out)
+	}
+	a.Git("commit", "-q", "-m", "attributes")
+	if out := a.Enc("init"); strings.Contains(out, ".gitattributes") {
+		t.Fatalf("init mentioned .gitattributes again:\n%s", out)
+	}
+}

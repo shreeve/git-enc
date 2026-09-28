@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.2.1
+
+- `git enc init` and `git enc add` say when they add git-enc's line to
+  `.gitattributes`, and that it is staged for your next commit. `init` did
+  it silently, and an uncommitted `.gitattributes` could later block a
+  teammate's pull.
+- README: how to have macOS show git-enc's notifications as banners.
+
 ## v0.2.0
 
 ### Upgrading from v0.1.x

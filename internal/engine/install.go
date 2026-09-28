@@ -14,19 +14,22 @@ import (
 
 // AttrLine keeps git from treating ciphertext as text (line-ending
 // conversion would corrupt it, and a text merge would write conflict
-// markers into it), names the diff driver `git enc reveal` will use, and
-// makes git (and GitHub Desktop) handle .enc conflicts as binary files.
+// markers into it), names the diff driver for optional decrypted diffs
+// (diff.git-enc.textconv), and makes git (and GitHub Desktop) handle .enc
+// conflicts as binary files.
 const AttrLine = "*.enc -text diff=git-enc merge=binary"
 
 // ensureAttributes adds AttrLine to the root .gitattributes and stages it.
-func (e *Engine) ensureAttributes() error {
+// It returns what it did, for the user to commit, or "" if the line was
+// there already.
+func (e *Engine) ensureAttributes() (string, error) {
 	data, err := fsx.ReadRegular(e.Repo.Root, ".gitattributes")
 	if err != nil {
-		return err
+		return "", err
 	}
 	for _, line := range strings.Split(string(data), "\n") {
 		if strings.TrimSpace(line) == AttrLine {
-			return nil
+			return "", nil
 		}
 	}
 	var b bytes.Buffer
@@ -36,10 +39,12 @@ func (e *Engine) ensureAttributes() error {
 	}
 	b.WriteString("# git-enc: encrypted secrets are binary\n" + AttrLine + "\n")
 	if err := fsx.WriteWorktree(e.Repo.Root, ".gitattributes", b.Bytes(), 0o644); err != nil {
-		return err
+		return "", err
 	}
-	_, err = e.Repo.Git("add", "--", ".gitattributes")
-	return err
+	if _, err := e.Repo.Git("add", "--", ".gitattributes"); err != nil {
+		return "", err
+	}
+	return "added `" + AttrLine + "` to .gitattributes (staged; commit it, so every clone treats .enc files as binary)", nil
 }
 
 const (
@@ -226,8 +231,12 @@ func (e *Engine) HooksInstalled() bool {
 func (e *Engine) Init(binary string) ([]string, error) {
 	var out []string
 	if len(e.Spec.Blocks) > 0 {
-		if err := e.ensureAttributes(); err != nil {
+		msg, err := e.ensureAttributes()
+		if err != nil {
 			return out, err
+		}
+		if msg != "" {
+			out = append(out, msg)
 		}
 	}
 	msgs, err := e.installHooks(binary)
