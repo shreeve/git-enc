@@ -815,9 +815,12 @@ func postHook(name string) int {
 	} else {
 		out, _ = e.Hook(name)
 	}
-	if engine.RunByDesktop() {
-		// Desktop never shows this hook's output: keep it for the next list.
-		e.RecordForDesktop(map[string]string{"post-merge": "merge", "post-rewrite": "rebase", "post-checkout": "branch switch"}[name])
+	if e.Desktop() {
+		// Desktop never shows this hook's output: keep it for the next
+		// list, and tell of what needs the user now.
+		what := map[string]string{"post-merge": "merge", "post-rewrite": "rebase", "post-checkout": "branch switch"}[name]
+		e.RecordForDesktop(what)
+		e.NotifyDesktop(what)
 	}
 	attention := len(e.Reminders()) > 0
 	for _, l := range out {
@@ -831,7 +834,7 @@ func postHook(name string) int {
 	// there post-merge and post-rewrite fail when something needs you (git
 	// ignores their exit code). Not post-checkout: its exit code becomes
 	// the checkout's, and a branch switch that happened would look failed.
-	if attention && engine.RunByDesktop() && (name == "post-merge" || name == "post-rewrite") {
+	if attention && e.Desktop() && (name == "post-merge" || name == "post-rewrite") {
 		return exitError
 	}
 	return exitOK
@@ -879,7 +882,7 @@ func cmdHook(args []string) int {
 		}
 		return exitOK
 	}
-	if engine.RunByDesktop() && (args[0] == "pre-commit" || args[0] == "pre-push") {
+	if e.Desktop() && (args[0] == "pre-commit" || args[0] == "pre-push") {
 		return desktopHook(e, args[0])
 	}
 	out, stop := e.Hook(args[0])

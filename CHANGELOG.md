@@ -30,6 +30,11 @@
   secrets in Desktop's dialog: ✘ stops the commit (an edit not encrypted,
   plaintext staged…), ! needs you and is shown once (a conflict, a missing
   key, a rollback), ✔ says what a pull updated.
+- Under Desktop, a pull that leaves a secret needing you posts a system
+  notification (macOS, Windows, Linux with notify-send), once per problem.
+- `enc.desktop false` makes the hooks behave under Desktop as in a
+  terminal; `enc.notify false` turns the notifications off. The README
+  lists every optional behavior and its switch.
 - `git config enc.skipKeys ops` quiets the blocks of a key you don't hold
   on purpose (another group's secrets, or a CI job's).
 - `git enc update` warns when a secret would go back to an earlier value,

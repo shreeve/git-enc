@@ -1762,3 +1762,50 @@ func TestDesktopReport(t *testing.T) {
 	}
 	a.Git("commit", "-q", "-m", "app")
 }
+
+// Under Desktop, a problem a pull brings is told at once, in a system
+// notification (once per problem); enc.notify false and enc.desktop false
+// turn that, and all the Desktop behavior, off.
+func TestDesktopNotify(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the notifier is PowerShell there")
+	}
+	_, a, b := team(t)
+	// Stand-ins for the system notifiers: they log what they would show.
+	fake, log := t.TempDir(), filepath.Join(t.TempDir(), "notified")
+	for _, name := range []string{"osascript", "notify-send"} {
+		os.WriteFile(filepath.Join(fake, name), []byte("#!/bin/sh\necho \"$@\" >> '"+log+"'\n"), 0o755)
+	}
+	a.Env = []string{"GITHUB_DESKTOP=1", "PATH=" + fake + string(os.PathListSeparator) + pathList()}
+	notified := func() string { data, _ := os.ReadFile(log); return string(data) }
+
+	a.Write(".env", "API_KEY=mine\n")
+	b.Write(".env", "API_KEY=theirs\n")
+	b.Enc("add", ".env")
+	b.commitPush("theirs")
+	a.Git("pull", "-q")
+	time.Sleep(200 * time.Millisecond) // the notifier is not waited for
+	if got := notified(); !strings.Contains(got, ".env: you edited it, and it changed in git too") || !strings.Contains(got, "git enc update .env") {
+		t.Fatalf("notification: %q", got)
+	}
+	// Another pull (of something else) finds the same problem: not told again.
+	b.Write("other.txt", "o\n")
+	b.Git("add", "other.txt")
+	b.commitPush("other")
+	a.Git("pull", "-q")
+	time.Sleep(200 * time.Millisecond)
+	if n := strings.Count(notified(), ".env:"); n != 1 {
+		t.Fatalf("notified %d times:\n%s", n, notified())
+	}
+
+	// enc.desktop false: hooks behave as in a terminal (no list, no stop
+	// for an edit not added).
+	a.Enc("update", "--discard", ".env")
+	a.Git("config", "enc.desktop", "false")
+	a.Write(".env", "API_KEY=edited\n")
+	a.Write("app.txt", "x\n")
+	a.Git("add", "app.txt")
+	if r := a.TryGit("commit", "-q", "-m", "app"); r.Code != 0 || !strings.Contains(r.Err, "edited but not added") {
+		t.Fatalf("commit with enc.desktop false (exit %d):\n%s", r.Code, r.Err)
+	}
+}

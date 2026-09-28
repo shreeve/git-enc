@@ -209,7 +209,7 @@ func (r *Repo) Config(key string) string {
 
 // knownConfig are the settings git-enc reads, fetched together, as
 // written, the first time any of them is asked for.
-var knownConfig = []string{"core.ignorecase", "enc.requireadded", "enc.skipkeys", "enc.autoupdate"}
+var knownConfig = []string{"core.ignorecase", "enc.requireadded", "enc.skipkeys", "enc.autoupdate", "enc.desktop", "enc.notify"}
 
 // ConfigBool reads a boolean config value with a default.
 func (r *Repo) ConfigBool(key string, def bool) bool {

@@ -254,8 +254,27 @@ tell), git-enc works with that:
   With nothing to say, the commit goes ahead; Desktop's commit progress
   view (the terminal button while it commits) shows
   `✔ git-enc: 3 secrets, all encrypted and current`.
+- **A pull that leaves a secret needing you is told at once**, in a
+  system notification ("config.yml: you edited it, and it changed in git
+  too. In a terminal: git enc update config.yml"), once per problem.
 - Should a future Desktop show the output of hooks after a pull, the
   post-merge hook already reports a failure when a secret needs you.
+
+### Turning things off
+
+Everything beyond encrypting, decrypting and refusing to commit plaintext
+is optional, per clone, with `git config`:
+
+| Setting | Default | What it does |
+|---|---|---|
+| `enc.autoUpdate` | off (on under Desktop) | pulls and checkouts update secrets that need no judgment |
+| `enc.requireAdded` | off (on under Desktop) | a commit stops while a secret is edited but not encrypted |
+| `enc.desktop` | on | `false`: under Desktop, the hooks behave as in a terminal (no list, no notifications) |
+| `enc.notify` | on | `false`: no system notifications under Desktop |
+| `enc.skipKeys` | none | blocks whose key you don't hold on purpose stay quiet |
+
+To have no hooks at all, don't run `git enc init`, or delete the hooks it
+installed (each says it is safe to delete).
 
 Also:
 
