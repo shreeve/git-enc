@@ -226,7 +226,9 @@ reminders would go unseen there. When Desktop runs git (git-enc can tell),
 the hooks do instead what the reminders ask for:
 
 - **Pulls and branch switches update your secrets** (as
-  `enc.autoUpdate` does), except ones with your edits in them.
+  `enc.autoUpdate` does), except ones with your edits in them. When one
+  needs you after a pull (a conflict, a missing key), the post-merge hook
+  reports a failure, so a Desktop that shows such failures shows why.
 - **A commit is refused while a secret is edited but not encrypted**, with
   the reason in Desktop's error dialog: Desktop cannot see the plaintext
   (it is ignored), so run `git enc add` in a terminal first. To commit

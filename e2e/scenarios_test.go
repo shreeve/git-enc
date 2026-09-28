@@ -1664,3 +1664,30 @@ func desktopFlow(t *testing.T, env []string) {
 		t.Fatalf("pull under Desktop did not update: .env = %q", got)
 	}
 }
+
+// Under GitHub Desktop, post-merge fails when something needs the user, so
+// Desktop has a reason to show its message; anywhere else it never fails.
+func TestDesktopPostMergeSignals(t *testing.T) {
+	_, a, b := team(t)
+	desktop := []string{"GITHUB_DESKTOP=1"}
+	a.Write(".env", "API_KEY=mine\n")
+	b.Write(".env", "API_KEY=theirs\n")
+	b.Enc("add", ".env")
+	b.commitPush("theirs")
+	a.Git("fetch", "-q")
+	a.Git("merge", "-q", "--ff-only", "origin/main") // a conflict for .env: both changed it
+	if r := a.Binary("hook", "post-merge"); r.Code != 0 {
+		t.Fatalf("post-merge outside Desktop: exit %d", r.Code)
+	}
+	a.Env = desktop
+	if r := a.Binary("hook", "post-merge"); r.Code != 1 || !strings.Contains(r.Err, ".env") {
+		t.Fatalf("post-merge under Desktop with a conflict: exit %d\n%s", r.Code, r.Err)
+	}
+	if r := a.Binary("hook", "post-checkout", "x", "y", "1"); r.Code != 0 {
+		t.Fatalf("post-checkout under Desktop must not fail: exit %d", r.Code)
+	}
+	a.Enc("update", "--discard", ".env")
+	if r := a.Binary("hook", "post-merge"); r.Code != 0 {
+		t.Fatalf("post-merge under Desktop with nothing to do: exit %d\n%s", r.Code, r.Err)
+	}
+}
