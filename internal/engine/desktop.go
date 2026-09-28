@@ -256,11 +256,19 @@ func renderDesktop(name string, notes []note, secrets, seen int, fail bool) stri
 			fmt.Fprintf(&b, "   %-*s  %sin a terminal: %s%s\n", width, "", dim, n.Hint, reset)
 		}
 	}
+	// Desktop's dialog is 80 columns wide, and its buttons depend on its
+	// settings: with its hook handling on (GITHUB_DESKTOP set), "Ignore and
+	// Continue" and "Abort"; with it off, only "Close".
+	buttons := os.Getenv("GITHUB_DESKTOP") != ""
 	switch {
+	case stops > 0 && buttons:
+		fmt.Fprintf(&b, "%sAbort, fix each %s, and %s again.\nIgnore and Continue would %s it as it is.%s\n", dim, markStop, what, what, reset)
 	case stops > 0:
-		fmt.Fprintf(&b, "%sAbort, fix each %s, and %s again. Ignore and Continue would %s it as it is.%s\n", dim, markStop, what, what, reset)
-	case fail:
+		fmt.Fprintf(&b, "%sFix each %s, then %s again.%s\n", dim, markStop, what, reset)
+	case fail && buttons:
 		fmt.Fprintf(&b, "%sIgnore and Continue to go ahead: git-enc won't stop you for these again.%s\n", dim, reset)
+	case fail:
+		fmt.Fprintf(&b, "%s%s again to go ahead: git-enc won't stop you for these again.%s\n", dim, strings.ToUpper(what[:1])+what[1:], reset)
 	}
 	return b.String()
 }

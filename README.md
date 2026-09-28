@@ -317,9 +317,11 @@ git-enc works with GitHub Desktop, once `git enc init` has run in the clone.
 After `git enc add` (in a terminal), the `.enc` appears in Desktop's changes
 like any other file, and you commit it there.
 
-Desktop shows a hook's output only when the hook fails, in a dialog with
-**Ignore and Continue** and **Abort**, and never shows what the hooks after a
-pull or branch switch say. So when Desktop runs git, git-enc works with that:
+Desktop shows a hook's output only when the hook fails, in a dialog, and
+never shows what the hooks after a pull or branch switch say. (The dialog
+offers **Ignore and Continue** and **Abort** when Desktop's own hook handling
+is on, under Settings → Git; otherwise just **Close**.) So when Desktop runs
+git, git-enc works with that:
 
 - **Pulls and branch switches update your secrets**, except ones with your
   edits in them.
@@ -340,7 +342,7 @@ pull or branch switch say. So when Desktop runs git, git-enc works with that:
   **✘** stops the commit, every time: an edit not encrypted (to commit
   without it: `git config enc.requireAdded false`), plaintext staged, a
   `.enc` that isn't encrypted, a merge that drops one side's change.
-  **!** needs you, and is shown once; after that the commit goes ahead.
+  **!** needs you, and is shown once: commit again, and it goes ahead.
   **✔** is what git-enc did since the last list.
 
 Two more things to know: Desktop shows `.enc` changes as binary files, and
