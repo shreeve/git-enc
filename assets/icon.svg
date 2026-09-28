@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-labelledby="t">
+  <title id="t">git-enc</title>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#16837a"/>
+      <stop offset="1" stop-color="#0b4f4a"/>
+    </linearGradient>
+    <linearGradient id="lock" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#e6f2f1"/>
+    </linearGradient>
+  </defs>
+  <!-- tile, on the macOS icon grid: 824 of 1024, corner radius 185 -->
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#bg)"/>
+  <!-- shackle -->
+  <path d="M378 470 V372 a134 134 0 0 1 268 0 V470" fill="none" stroke="#e6f2f1" stroke-width="70" stroke-linecap="round"/>
+  <!-- body -->
+  <rect x="282" y="448" width="460" height="366" rx="72" fill="url(#lock)"/>
+  <!-- a git branch, cut into the body -->
+  <g stroke="#0b4f4a" stroke-width="44" fill="none" stroke-linecap="round">
+    <path d="M452 552 V708"/>
+    <path d="M586 584 C586 648 526 662 458 684"/>
+  </g>
+  <circle cx="452" cy="540" r="42" fill="#0b4f4a"/>
+  <circle cx="452" cy="722" r="42" fill="#0b4f4a"/>
+  <circle cx="586" cy="572" r="44" fill="#f59e0b"/>
+</svg>

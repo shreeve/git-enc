@@ -1,3 +1,5 @@
+<p align="center"><img src="assets/icon.svg" width="128" alt=""></p>
+
 # git-enc
 
 Keep secrets in git, encrypted, and declare them where you already
@@ -435,6 +437,44 @@ regime (HIPAA, SOC 2), large teams, or teams with frequent turnover. Those
 need per-person access, revocation and audit logs; use a secrets manager
 (1Password, Doppler, Vault, a cloud KMS, SOPS). git-enc fits small, trusted
 teams sharing development and staging secrets.
+
+## Troubleshooting
+
+**`status` says `diverged`.** git-enc has lost track of where your copy
+came from (a fresh `.git/git-enc`, say), and your copy matches no committed
+version, so it won't guess. `git enc update F` keeps yours and puts the
+committed version in `F.incoming`: merge what you need into `F`, then
+`git enc add F`.
+
+**`no-key`.** You don't have the key its block needs. Get it from whoever
+shares it, then `git enc key add NAME`. If `status` says your key file is
+unusable, fix what it names (usually `chmod 600`). If you are not meant to
+have that key: `git config enc.skipKeys NAME`.
+
+**CI exits 4.** `GIT_ENC_KEY` lacks a key a block needs; `git enc update`
+names the secrets it skipped. For blocks CI should not read:
+`git -c enc.skipKeys=NAME enc update`.
+
+**"this clone is not set up".** Run `git enc init`: once per clone, and
+again after upgrading git-enc.
+
+**A commit or push is refused.** The message says why and what to run. If
+it caught plaintext you committed but have not pushed, the secret has not
+left your machine: take it out of those commits (for the last one:
+`git reset --soft HEAD~1`, then `git rm --cached F`) and there is no need
+to change it. If it was pushed, change the secret.
+
+**I want my old copy back.** Every plaintext git-enc replaced is in
+`.git/git-enc/backup/`, newest last: `git enc cat .git/git-enc/backup/NAME > F`.
+
+**Nobody has the key any more.** The versions in git cannot be decrypted,
+but your plaintext copies are fine. Start that block over: create a key
+(`git enc key new NAME`), delete the block from `.gitignore`, `git rm` its
+`.enc` files and commit, then `git enc add --key NAME FILE…`.
+
+**Where does git-enc keep things, and what can I set?** See the
+[reference](docs/reference.md): every file it writes, settings,
+environment variables, exit codes, and the JSON for tools.
 
 ## Compared with other tools
 

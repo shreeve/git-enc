@@ -40,6 +40,14 @@
 - `git enc update` warns when a secret would go back to an earlier value,
   which is how a rollback by someone without the key looks.
 
+### Documentation
+
+- A reference ([docs/reference.md](docs/reference.md)): every file git-enc
+  writes, settings, environment variables, exit codes, and the JSON for
+  tools; a troubleshooting section; `SECURITY.md` for reporting problems
+  privately; an app icon (`assets/icon.svg`, and `icon-mono.svg` in one
+  color for menu bars and trays).
+
 ### Security
 
 - `.gitignore`, which anyone who can push may edit, can no longer redirect
